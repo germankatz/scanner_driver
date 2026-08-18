@@ -3,6 +3,7 @@ name: Build Windows
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -10,6 +11,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write   # necesario para crear el release
 
     steps:
       - uses: actions/checkout@v4
@@ -37,3 +40,15 @@ jobs:
           path: dist/AntigravityScanner.exe
           if-no-files-found: error
           retention-days: 30
+
+      # Sólo cuando se pushea un tag vXXX. Un push normal a main deja
+      # únicamente el artifact, que es lo que se quiere para probar.
+      - name: Publicar release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create ${{ github.ref_name }}
+          dist/AntigravityScanner.exe
+          --title "Antigravity Scanner ${{ github.ref_name }}"
+          --generate-notes
