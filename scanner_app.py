@@ -652,10 +652,22 @@ class ScannerApp(QMainWindow):
         self.btn_debug.setCheckable(True)
         self.btn_debug.setObjectName("debugButton")
         self.btn_debug.setToolTip("Activar Modo Debug (Guarda imágenes para diagnóstico)")
-        
+
+        # Reprocesar un archivo ya escaneado. Sirve sobre todo para analizar un
+        # _raw.bmp que quedó guardado porque la detección falló: con 🐛 activo
+        # genera una máscara por estrategia y muestra en cuál se rompió.
+        btn_local = QPushButton("📂 Procesar archivo")
+        btn_local.setObjectName("secondaryButton")
+        btn_local.setToolTip(
+            "Procesa una imagen existente sin escanear. Con el modo debug activo "
+            "genera las máscaras de diagnóstico de cada estrategia de detección."
+        )
+        btn_local.clicked.connect(self.process_local_image)
+
         top_layout.addWidget(QLabel("Escáner:"))
         top_layout.addWidget(self.cb_scanner)
         top_layout.addStretch()
+        top_layout.addWidget(btn_local)
         top_layout.addWidget(btn_config)
         top_layout.addWidget(self.btn_debug)
         main_layout.addLayout(top_layout)
@@ -949,9 +961,25 @@ class ScannerApp(QMainWindow):
             self.log_to_console(f"Procesando archivo local: {file_path}")
             
             try:
-                final_path, _detectado = process_and_crop(file_path, out_path, None, debug_active)
+                # process_and_crop espera algo con .emit() (normalmente una
+                # pyqtSignal del hilo de escaneo). Acá ya estamos en el hilo de
+                # UI, así que alcanza con un adaptador que escriba directo.
+                class _LogDirecto:
+                    def __init__(self, fn): self.emit = fn
+
+                final_path, detectado = process_and_crop(
+                    file_path, out_path, _LogDirecto(self.log_to_console), debug_active
+                )
                 self.display_image(final_path)
-                self.log_to_console("Procesamiento local terminado.")
+                if debug_active:
+                    self.log_to_console(
+                        f"Máscaras de diagnóstico escritas en {os.path.dirname(out_path)}"
+                    )
+                self.log_to_console(
+                    "Procesamiento local terminado."
+                    if detectado else
+                    "Procesamiento local terminado SIN detectar documento."
+                )
                 self.lbl_preview.setText("Listo para el siguiente escaneo.")
             except Exception as e:
                 self.log_to_console(f"Error procesando imagen local: {e}")
