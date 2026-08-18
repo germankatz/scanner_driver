@@ -1,0 +1,21 @@
+# Artefactos de build (90 MB + 86 MB, se regeneran en CI)
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec.bak
+
+# Escaneos: son fichas electorales reales, con datos personales y huella
+# dactilar. Nunca deben salir de la máquina.
+Scans/
+*.bmp
+*.png
+*.jpg
+*.jpeg
+doc_*_raw.*
+
+# Volcados de propiedades del escáner (pueden traer nº de serie del equipo)
+properties.txt
+
+# Configuración local del usuario
+config.json
