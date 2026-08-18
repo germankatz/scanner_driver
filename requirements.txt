@@ -1,4 +1,7 @@
-PyQt6
-opencv-python-headless
-numpy
-pywin32; sys_platform == "win32"
+# Versiones fijas a propósito. Un build sin fijar tomó OpenCV 5.0.0.93 recién
+# publicado, y el .exe resultante falló al cargar las DLLs de numpy en la
+# máquina de destino. El ciclo 4.x es el que estaba probado en producción.
+PyQt6==6.11.0
+opencv-python-headless==4.14.0.94
+numpy==2.3.5
+pywin32==312; sys_platform == "win32"

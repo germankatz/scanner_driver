@@ -30,14 +30,38 @@ jobs:
       - name: Verificar que el módulo importa
         run: python -c "import scanner_app; print('import OK')"
 
-      - name: Build
+      - name: Build (archivo único)
         run: pyinstaller --noconfirm AntigravityScanner.spec
 
-      - name: Publicar el .exe
+      # Compilar sin error no significa que el .exe funcione: numpy y OpenCV
+      # cargan sus DLLs recién al importarse. Acá se ejecuta el binario real.
+      - name: Verificar que el ejecutable carga sus DLLs
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\dist\AntigravityScanner.exe -ArgumentList '--selftest' -Wait -PassThru
+          if (Test-Path .\dist\selftest.log) { Get-Content .\dist\selftest.log }
+          if ($p.ExitCode -ne 0) { Write-Error "El ejecutable no pasa el selftest"; exit 1 }
+
+      - name: Build (carpeta, plan B para antivirus restrictivo)
+        run: pyinstaller --noconfirm AntigravityScanner-carpeta.spec
+
+      - name: Verificar la variante en carpeta
+        shell: pwsh
+        run: |
+          $exe = '.\dist\AntigravityScanner\AntigravityScanner.exe'
+          $p = Start-Process -FilePath $exe -ArgumentList '--selftest' -Wait -PassThru
+          $log = '.\dist\AntigravityScanner\selftest.log'
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.ExitCode -ne 0) { Write-Error "La variante en carpeta no pasa el selftest"; exit 1 }
+          Compress-Archive -Path .\dist\AntigravityScanner -DestinationPath .\dist\AntigravityScanner-carpeta.zip -Force
+
+      - name: Publicar artifacts
         uses: actions/upload-artifact@v4
         with:
           name: AntigravityScanner
-          path: dist/AntigravityScanner.exe
+          path: |
+            dist/AntigravityScanner.exe
+            dist/AntigravityScanner-carpeta.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -50,5 +74,6 @@ jobs:
         run: >
           gh release create ${{ github.ref_name }}
           dist/AntigravityScanner.exe
+          dist/AntigravityScanner-carpeta.zip
           --title "Antigravity Scanner ${{ github.ref_name }}"
           --generate-notes

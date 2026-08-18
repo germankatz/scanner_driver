@@ -3,6 +3,70 @@ import os
 import time
 import glob
 import json
+
+
+def run_selftest():
+    """
+    Verifica que las extensiones nativas carguen dentro del ejecutable
+    empaquetado. Existe porque compilar sin error no garantiza que el .exe
+    funcione: numpy y OpenCV cargan DLLs recien al importarse, y un fallo ahi
+    solo aparece en tiempo de ejecucion.
+
+    Escribe selftest.log junto al ejecutable y devuelve 0 si todo carga.
+    Se usa en CI y sirve para diagnosticar una maquina concreta:
+        AntigravityScanner.exe --selftest
+    """
+    lineas, ok = [], True
+    lineas.append(f"python   : {sys.version.split()[0]}")
+    lineas.append(f"ejecutable: {sys.executable}")
+    lineas.append(f"congelado : {getattr(sys, 'frozen', False)}")
+
+    modulos = ["numpy", "cv2", "PyQt6.QtCore"]
+    if sys.platform == "win32":
+        modulos += ["win32com.client", "pythoncom"]
+
+    for modulo in modulos:
+        try:
+            m = __import__(modulo)
+            ver = getattr(m, "__version__", "sin version")
+            lineas.append(f"OK   {modulo} {ver}")
+        except Exception as e:
+            ok = False
+            lineas.append(f"FALLA {modulo}: {type(e).__name__}: {e}")
+
+    # No alcanza con importar: numpy y cv2 cargan DLLs adicionales de forma
+    # perezosa, asi que hay que ejercitarlas de verdad.
+    if ok:
+        try:
+            import numpy as np, cv2
+            a = np.ones((8, 8, 3), dtype=np.uint8) * 127
+            g = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
+            _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            lineas.append(f"OK   operaciones numpy+cv2 (media {float(a.mean()):.1f})")
+        except Exception as e:
+            ok = False
+            lineas.append(f"FALLA operaciones numpy+cv2: {type(e).__name__}: {e}")
+
+    lineas.append("RESULTADO: OK" if ok else "RESULTADO: FALLA")
+    texto = "\n".join(lineas)
+    print(texto)
+    try:
+        destino = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "selftest.log")
+        with open(destino, "w", encoding="utf-8") as f:
+            f.write(texto + "\n")
+        print(f"(escrito en {destino})")
+    except Exception:
+        pass
+    return 0 if ok else 1
+
+
+if __name__ == "__main__" and "--selftest" in sys.argv:
+    # Antes de los imports pesados a propósito: si numpy o PyQt6 no cargan,
+    # este es el modo que tiene que seguir funcionando para poder reportarlo.
+    sys.exit(run_selftest())
+
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QLineEdit, QPushButton, QTextEdit, QFrame,
@@ -763,7 +827,12 @@ class ScannerApp(QMainWindow):
         # Auto-increment rellenando huecos: un solo listdir en vez de un
         # os.path.exists por número (clave en unidades de red).
         import re
-        pattern = re.compile(re.escape(self.file_prefix) + r"(\d+)\.png$", re.IGNORECASE)
+        # Se cuentan los .png y tambien los _raw.bmp: si el procesamiento
+        # falla no se llega a crear el .png, y sin mirar los crudos el
+        # siguiente escaneo reusaria el mismo numero y pisaria el anterior.
+        pattern = re.compile(
+            re.escape(self.file_prefix) + r"(\d+)(?:_raw)?\.(?:png|bmp)$", re.IGNORECASE
+        )
         try:
             names = os.listdir(self.output_dir)
         except OSError:
@@ -1080,6 +1149,7 @@ class ScannerApp(QMainWindow):
         }
         """
         self.setStyleSheet(qss)
+
 
 if __name__ == '__main__':
     if hasattr(Qt.ApplicationAttribute, 'AA_EnableHighDpiScaling'):
