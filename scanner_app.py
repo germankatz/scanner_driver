@@ -72,7 +72,7 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox, QLineEdit, QPushButton, QTextEdit, QFrame,
     QDialog, QFileDialog, QGraphicsDropShadowEffect, QSpacerItem, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QEvent, QSize
 from PyQt6.QtGui import QFont, QColor, QPixmap, QKeySequence, QShortcut
 
 # TWAIN eliminado. WIA se cargará dinámicamente usando win32com.client
@@ -691,6 +691,7 @@ class ScannerApp(QMainWindow):
                     pass
 
         self.is_first_scan = True
+        self._preview_pixmap = None
             
         self.setup_ui()
         self.apply_dark_theme()
@@ -740,6 +741,15 @@ class ScannerApp(QMainWindow):
         self.lbl_preview = QLabel("Presiona ENTER o haz clic en 'INICIAR ESCANEO'")
         self.lbl_preview.setObjectName("previewCanvas")
         self.lbl_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Ignored en ambos ejes: sin esto el sizeHint del label crece con el
+        # pixmap que se le pone, y el tamaño de la vista previa termina
+        # dependiendo de la imagen anterior y del historial de resizes.
+        self.lbl_preview.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                       QSizePolicy.Policy.Ignored)
+        self.lbl_preview.setMinimumSize(QSize(1, 1))
+        # Se escucha el resize del label, no el de la ventana: el label se
+        # redimensiona después, cuando el layout ya repartió el espacio.
+        self.lbl_preview.installEventFilter(self)
         main_layout.addWidget(self.lbl_preview, stretch=1)
 
         # Scan Button
@@ -854,7 +864,7 @@ class ScannerApp(QMainWindow):
             return
             
         self.btn_scan.setEnabled(False)
-        self.lbl_preview.setText("Escaneando...")
+        self.set_preview_text("Escaneando...")
         
         scanner = self.cb_scanner.currentText()
         out_path = self.get_next_filename()
@@ -870,14 +880,14 @@ class ScannerApp(QMainWindow):
     def scan_finished(self):
         self.btn_scan.setEnabled(True)
         if self.lbl_preview.text() in ["Escaneando...", "Modo Manual Activo..."]:
-            self.lbl_preview.setText("Listo para el siguiente escaneo.")
+            self.set_preview_text("Listo para el siguiente escaneo.")
 
     def start_scan_manual(self):
         if not self.btn_scan.isEnabled():
             return
             
         self.btn_scan.setEnabled(False)
-        self.lbl_preview.setText("Modo Manual Activo...")
+        self.set_preview_text("Modo Manual Activo...")
         
         scanner = self.cb_scanner.currentText()
         out_path = self.get_next_filename()
@@ -1026,7 +1036,7 @@ class ScannerApp(QMainWindow):
         if file_path:
             out_path = self.get_next_filename()
             debug_active = self.btn_debug.isChecked()
-            self.lbl_preview.setText("Procesando imagen local...")
+            self.set_preview_text("Procesando imagen local...")
             self.log_to_console(f"Procesando archivo local: {file_path}")
             
             try:
@@ -1049,18 +1059,47 @@ class ScannerApp(QMainWindow):
                     if detectado else
                     "Procesamiento local terminado SIN detectar documento."
                 )
-                self.lbl_preview.setText("Listo para el siguiente escaneo.")
+                self.set_preview_text("Listo para el siguiente escaneo.")
             except Exception as e:
                 self.log_to_console(f"Error procesando imagen local: {e}")
+
+    def set_preview_text(self, mensaje):
+        """Mensaje en el visor, descartando la imagen que hubiera."""
+        self._preview_pixmap = None
+        self.lbl_preview.setText(mensaje)
+
+    def eventFilter(self, obj, event):
+        if obj is self.lbl_preview and event.type() == QEvent.Type.Resize:
+            self.render_preview()
+        return super().eventFilter(obj, event)
+
+    def render_preview(self):
+        """
+        Reescala desde el original en cada resize. Escalar una sola vez al
+        cargar dejaba la vista previa al tamaño que la ventana tenía en ese
+        momento, y no se actualizaba nunca más.
+        """
+        if self._preview_pixmap is None or self._preview_pixmap.isNull():
+            return
+        area = self.lbl_preview.contentsRect().size()
+        if area.width() < 2 or area.height() < 2:
+            return
+        self.lbl_preview.setPixmap(self._preview_pixmap.scaled(
+            area,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
 
     @pyqtSlot(str)
     def display_image(self, filepath):
         pixmap = QPixmap(filepath)
-        if not pixmap.isNull():
-            scaled_pixmap = pixmap.scaled(self.lbl_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            self.lbl_preview.setPixmap(scaled_pixmap)
-        else:
-            self.lbl_preview.setText("Error al cargar la imagen.")
+        if pixmap.isNull():
+            self.set_preview_text("Error al cargar la imagen.")
+            return
+        # Se guarda el original y se escala una copia: reescalar sobre lo ya
+        # escalado degrada la imagen con cada resize.
+        self._preview_pixmap = pixmap
+        self.render_preview()
 
     @pyqtSlot()
     def scan_finished(self):
@@ -1068,7 +1107,7 @@ class ScannerApp(QMainWindow):
         if hasattr(self, 'btn_scan_auto'):
             self.btn_scan_auto.setEnabled(True)
         if self.lbl_preview.text() == "Escaneando...":
-            self.lbl_preview.setText("Listo para el siguiente escaneo.")
+            self.set_preview_text("Listo para el siguiente escaneo.")
 
     def apply_dark_theme(self):
         qss = """
