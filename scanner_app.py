@@ -144,15 +144,19 @@ def _detect_document(small_img, debug_dir=None):
     flojo = None
 
     for name, mask in strategies:
-        m = mask.copy()
-        # Borde negro para despegar el papel que toque el limite de la imagen
-        cv2.rectangle(m, (0, 0), (w, h), 0, 10)
-        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel, iterations=2)
+        m = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        # Borde negro para despegar el papel que toque el limite de la imagen.
+        # Se agrega por fuera en vez de pintarlo encima: pintado se comia 5 px
+        # de la version reducida (unos 25 px del crudo) de cualquier documento
+        # apoyado contra el borde. El offset devuelve los contornos a las
+        # coordenadas sin borde.
+        m = cv2.copyMakeBorder(m, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=0)
 
         if debug_dir:
             cv2.imwrite(os.path.join(debug_dir, f"debug_mask_{name}.jpg"), m)
 
-        contours, _ = cv2.findContours(m, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(m, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE,
+                                       offset=(-2, -2))
 
         estricto = None
         for c in contours:
@@ -181,12 +185,54 @@ def _detect_document(small_img, debug_dir=None):
     return None, None
 
 
+def _frame_margins(img):
+    """
+    Ancho del marco del escaner en cada borde del crudo: (arr, abj, izq, der).
+
+    La captura de la cama completa trae en los bordes el labio del marco, una
+    franja clara y pareja de punta a punta. Hay que sacarla: si queda, Otsu la
+    pone del lado del papel y el documento que la toca se funde con ella.
+
+    Antes se recortaba un porcentaje fijo, 64 px por lado a 300 dpi, cuando el
+    marco real de la cama oficio mide unos 30 px. Una ficha de 20 cm en una
+    cama de 21.6 cm tenia que caer en una ventana de 5 mm para no perder un
+    borde.
+
+    Una fila o columna es marco si es clara en practicamente todo su largo: un
+    documento nunca la cubre entera, siempre asoma cama oscura en algun lado.
+    El porcentaje viejo queda como tope, asi que nunca se recorta mas que antes.
+    """
+    import cv2
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    claro = gray > 100
+    filas = claro.mean(axis=1) > 0.98
+    columnas = claro.mean(axis=0) > 0.98
+
+    def racha(flags):
+        n = 0
+        while n < len(flags) and flags[n]:
+            n += 1
+        return n
+
+    h, w = gray.shape
+    tope_v = int(round(h * 0.0233))
+    tope_h = int(round(w * 0.0250))
+    colchon = 3  # para la transicion entre el marco y la cama
+
+    def margen(n, tope):
+        return min(n + colchon, tope) if n else 0
+
+    return (margen(racha(filas), tope_v), margen(racha(filas[::-1]), tope_v),
+            margen(racha(columnas), tope_h), margen(racha(columnas[::-1]), tope_h))
+
+
 def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False):
     """
     Procesa la imagen escaneada mediante una transformacion de perspectiva.
     Optimizado: Reduce la resolucion para hallar contornos rapido y aplica el
-    recorte en alta res. Recorta los bordes iniciales para evitar el marco
-    plastico del escaner.
+    recorte en alta res. Recorta el marco plastico del escaner, medido en cada
+    crudo.
 
     Devuelve (ruta_final, detectado). "detectado" en False significa que se
     guardo la cama completa como fallback.
@@ -199,16 +245,15 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
         if img is None:
             return input_path, False
 
-        # 1. Recortar el marco fisico del escaner. Las margenes van en
-        #    proporcion, no en pixeles fijos: el marco es de tamano fisico
-        #    constante, asi que en pixeles depende del dpi. Con los 35/30 px
-        #    fijos de antes, un escaneo a 300 dpi dejaba la mitad del marco.
+        # 1. Sacar el marco fisico del escaner, medido en este crudo en vez de
+        #    un porcentaje fijo (ver _frame_margins).
         h_orig, w_orig = img.shape[:2]
-        v_margin = int(round(h_orig * 0.0233))   # equivale a 35 px sobre 1500
-        h_margin = int(round(w_orig * 0.0250))   # equivale a 30 px sobre 1200
-
-        if h_orig > 2 * v_margin and w_orig > 2 * h_margin:
-            img = img[v_margin:h_orig - v_margin, h_margin:w_orig - h_margin]
+        top, bottom, left, right = _frame_margins(img)
+        img = img[top:h_orig - bottom, left:w_orig - right]
+        if debug_mode and log_signal:
+            log_signal.emit(
+                f"Marco recortado: izq {left}, der {right}, arr {top}, abj {bottom} px."
+            )
 
         # 2. Bajar la resolucion temporalmente para procesar rapido
         ratio = img.shape[0] / 800.0
@@ -226,6 +271,23 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
         if c is not None:
             # Ajustar contorno a la escala original
             c = (c.astype("float") * ratio).astype("int")
+
+            # Si el documento llega al borde de lo escaneado, lo que siga por
+            # debajo del marco se perdio y no hay procesamiento que lo
+            # recupere: hay que avisar para que lo corran.
+            bx, by, bw, bh = cv2.boundingRect(c)
+            tol = int(round(3 * ratio))
+            lados = [lado for lado, toca in (
+                ("izquierdo", bx <= tol),
+                ("derecho", bx + bw >= orig.shape[1] - tol),
+                ("superior", by <= tol),
+                ("inferior", by + bh >= orig.shape[0] - tol),
+            ) if toca]
+            if lados and log_signal:
+                log_signal.emit(
+                    f"AVISO: el documento toca el borde {' y '.join(lados)} de la cama. "
+                    f"Si ahí se cortó, correlo unos milímetros hacia adentro."
+                )
 
             if debug_mode:
                 debug_img = orig.copy()

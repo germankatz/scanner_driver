@@ -68,6 +68,7 @@ corrida de cada jornada:
 | `AVISO: el crudo salió 1200x1500 px (~150 dpi estimados)...` | La resolución quedó por debajo de lo pedido. El escaneo sirve pero tiene menos detalle del esperado. |
 | `Captura directa no disponible (...). Cayendo al diálogo nativo.` | El driver rechazó el control directo. Funciona igual, por el camino viejo. |
 | `AVISO: no se detectó el documento con ninguna estrategia...` | Se guardó la cama completa. El documento queda más chico dentro del archivo. |
+| `AVISO: el documento toca el borde derecho de la cama...` | El documento llega al límite de lo que ve el escáner. Si ese borde salió cortado, correlo unos milímetros hacia adentro y volvé a escanear. |
 
 ## Cuando algo sale mal
 
@@ -93,6 +94,11 @@ releyéndolas después para confirmar que el driver las aceptó de verdad. El á
 de escaneo se recalcula desde el tamaño físico de la cama, porque cambiar la
 resolución no siempre reescala el extent y quedarse con el viejo significa
 escanear solo un pedazo.
+
+**Marco.** El crudo trae en los bordes el labio del marco del escáner, una
+franja clara de punta a punta. Se mide en cada escaneo y se recorta solo eso:
+con el porcentaje fijo que se usaba antes, una ficha apoyada cerca del marco
+perdía un borde.
 
 **Detección.** Sobre una copia reducida a 800 px de alto (por velocidad) se
 prueban cuatro estrategias en cascada, y se usa la primera que da un resultado
