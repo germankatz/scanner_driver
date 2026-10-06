@@ -2,7 +2,7 @@
 #
 # Build de un solo archivo. Si en alguna máquina falla al cargar las DLLs
 # nativas (típico en equipos con antivirus corporativo que interfiere con la
-# extracción a %TEMP%), usar AntigravityScanner-carpeta.spec, que no extrae
+# extracción a %TEMP%), usar LaBestia-carpeta.spec, que no extrae
 # nada porque deja las DLLs sueltas en una carpeta.
 
 from PyInstaller.utils.hooks import collect_all
@@ -35,7 +35,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='AntigravityScanner',
+    name='LaBestia',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

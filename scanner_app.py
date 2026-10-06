@@ -15,7 +15,7 @@ def run_selftest():
 
     Escribe selftest.log junto al ejecutable y devuelve 0 si todo carga.
     Se usa en CI y sirve para diagnosticar una maquina concreta:
-        AntigravityScanner.exe --selftest
+        LaBestia.exe --selftest
     """
     lineas, ok = [], True
     lineas.append(f"python   : {sys.version.split()[0]}")
@@ -921,27 +921,41 @@ DEFAULT_PREFIX = "doc_"
 
 
 def _config_path():
-    """
-    %APPDATA%\AntigravityScanner\config.json en Windows, ~ como fallback.
+    r"""
+    %APPDATA%\LaBestia\config.json en Windows, ~ como fallback.
     No se guarda junto al .exe a propósito: empaquetado con PyInstaller puede
     quedar en Program Files, donde el usuario no tiene permiso de escritura.
     """
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    carpeta = os.path.join(base, "AntigravityScanner")
+    carpeta = os.path.join(base, "LaBestia")
     try:
         os.makedirs(carpeta, exist_ok=True)
     except Exception:
-        return os.path.join(os.path.expanduser("~"), ".antigravity_scanner.json")
+        return os.path.join(os.path.expanduser("~"), ".la_bestia.json")
     return os.path.join(carpeta, "config.json")
 
 
+def _old_config_paths():
+    """Dónde guardaba la configuración la app cuando se llamaba Antigravity Scanner."""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return [os.path.join(base, "AntigravityScanner", "config.json"),
+            os.path.join(os.path.expanduser("~"), ".antigravity_scanner.json")]
+
+
 def load_config():
-    try:
-        with open(_config_path(), "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        return cfg if isinstance(cfg, dict) else {}
-    except Exception:
-        return {}
+    # Primero la ubicación actual; si todavía no existe, la del nombre viejo.
+    # Sin esto, un equipo ya configurado volvería a los valores por defecto al
+    # actualizar, y empezaría a guardar los escaneos en otra carpeta. Lo
+    # primero que se guarde después ya va a la ubicación nueva.
+    for ruta in [_config_path()] + _old_config_paths():
+        try:
+            with open(ruta, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if isinstance(cfg, dict):
+                return cfg
+        except Exception:
+            continue
+    return {}
 
 
 def save_config(**cambios):
@@ -1309,7 +1323,7 @@ class ElidedLabel(QLabel):
 class ScannerApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Antigravity Scanner - Simplificado")
+        self.setWindowTitle("La bestia")
         self.resize(800, 700)
         cfg = load_config()
         self.output_dir = cfg.get("output_dir") or DEFAULT_OUTPUT_DIR

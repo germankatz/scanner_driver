@@ -1,4 +1,4 @@
-# Antigravity Scanner
+# La bestia
 
 [![Build Windows](https://github.com/germankatz/scanner_driver/actions/workflows/build-windows.yml/badge.svg)](https://github.com/germankatz/scanner_driver/actions/workflows/build-windows.yml)
 
@@ -18,6 +18,11 @@ El ejecutable no necesita Python ni instalación:
 
 Requiere Windows y un escáner con driver WIA (los de Windows desde XP en
 adelante lo son; TWAIN no está soportado).
+
+Hasta la versión 1.1.1 el programa se llamaba Antigravity Scanner y el
+ejecutable `AntigravityScanner.exe`. Es el mismo programa: al actualizar
+conserva la carpeta de destino, el prefijo y la calidad que ya estaban
+configurados.
 
 ## Uso
 
@@ -56,8 +61,9 @@ automático posterior.
 
 ## Configuración
 
-Se guarda en `%APPDATA%\AntigravityScanner\config.json` y se recuerda entre
-reinicios:
+Se guarda en `%APPDATA%\LaBestia\config.json` y se recuerda entre reinicios.
+Si ese archivo todavía no existe, se lee el del nombre anterior
+(`%APPDATA%\AntigravityScanner\config.json`):
 
 ```json
 {
@@ -151,7 +157,7 @@ resultado es el mismo que con OpenCV (la misma imagen leída, un PNG que
 decodifica a los mismos píxeles) y cualquier caso fuera de lo común se lo deja
 a OpenCV. Con eso, y con no calcular lo que no se usa en los demás pasos, el
 procesamiento de un escaneo de cama oficio a 300 dpi pasó de unos 290 ms a
-unos 85 ms. `AntigravityScanner.exe --selftest` verifica que `fast_io` dé lo
+unos 85 ms. `LaBestia.exe --selftest` verifica que `fast_io` dé lo
 mismo que OpenCV dentro del ejecutable.
 
 ## Desarrollo
@@ -165,7 +171,7 @@ Para empaquetar (solo en Windows: PyInstaller no cross-compila):
 
 ```bash
 pip install pyinstaller
-pyinstaller AntigravityScanner.spec
+pyinstaller LaBestia.spec
 ```
 
 Cada push a `main` dispara un build en CI que deja el `.exe` como artifact.

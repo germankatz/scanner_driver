@@ -31,37 +31,37 @@ jobs:
         run: python -c "import scanner_app; print('import OK')"
 
       - name: Build (archivo único)
-        run: pyinstaller --noconfirm AntigravityScanner.spec
+        run: pyinstaller --noconfirm LaBestia.spec
 
       # Compilar sin error no significa que el .exe funcione: numpy y OpenCV
       # cargan sus DLLs recién al importarse. Acá se ejecuta el binario real.
       - name: Verificar que el ejecutable carga sus DLLs
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath .\dist\AntigravityScanner.exe -ArgumentList '--selftest' -Wait -PassThru
+          $p = Start-Process -FilePath .\dist\LaBestia.exe -ArgumentList '--selftest' -Wait -PassThru
           if (Test-Path .\dist\selftest.log) { Get-Content .\dist\selftest.log }
           if ($p.ExitCode -ne 0) { Write-Error "El ejecutable no pasa el selftest"; exit 1 }
 
       - name: Build (carpeta, plan B para antivirus restrictivo)
-        run: pyinstaller --noconfirm AntigravityScanner-carpeta.spec
+        run: pyinstaller --noconfirm LaBestia-carpeta.spec
 
       - name: Verificar la variante en carpeta
         shell: pwsh
         run: |
-          $exe = '.\dist\AntigravityScanner\AntigravityScanner.exe'
+          $exe = '.\dist\LaBestia\LaBestia.exe'
           $p = Start-Process -FilePath $exe -ArgumentList '--selftest' -Wait -PassThru
-          $log = '.\dist\AntigravityScanner\selftest.log'
+          $log = '.\dist\LaBestia\selftest.log'
           if (Test-Path $log) { Get-Content $log }
           if ($p.ExitCode -ne 0) { Write-Error "La variante en carpeta no pasa el selftest"; exit 1 }
-          Compress-Archive -Path .\dist\AntigravityScanner -DestinationPath .\dist\AntigravityScanner-carpeta.zip -Force
+          Compress-Archive -Path .\dist\LaBestia -DestinationPath .\dist\LaBestia-carpeta.zip -Force
 
       - name: Publicar artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: AntigravityScanner
+          name: LaBestia
           path: |
-            dist/AntigravityScanner.exe
-            dist/AntigravityScanner-carpeta.zip
+            dist/LaBestia.exe
+            dist/LaBestia-carpeta.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -73,7 +73,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >
           gh release create ${{ github.ref_name }}
-          dist/AntigravityScanner.exe
-          dist/AntigravityScanner-carpeta.zip
-          --title "Antigravity Scanner ${{ github.ref_name }}"
+          dist/LaBestia.exe
+          dist/LaBestia-carpeta.zip
+          --title "La bestia ${{ github.ref_name }}"
           --generate-notes
