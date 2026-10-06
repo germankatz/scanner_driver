@@ -3,6 +3,7 @@ import os
 import time
 import glob
 import json
+import html
 
 
 def run_selftest():
@@ -21,7 +22,7 @@ def run_selftest():
     lineas.append(f"ejecutable: {sys.executable}")
     lineas.append(f"congelado : {getattr(sys, 'frozen', False)}")
 
-    modulos = ["numpy", "cv2", "PyQt6.QtCore"]
+    modulos = ["numpy", "cv2", "PyQt6.QtCore", "PyQt6.QtSvg"]
     if sys.platform == "win32":
         modulos += ["win32com.client", "pythoncom"]
 
@@ -99,11 +100,17 @@ if __name__ == "__main__" and "--selftest" in sys.argv:
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QLineEdit, QPushButton, QTextEdit, QFrame,
+    QLabel, QComboBox, QLineEdit, QPushButton, QTextEdit, QFrame, QStyledItemDelegate,
     QDialog, QFileDialog, QGraphicsDropShadowEffect, QSpacerItem, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QEvent, QSize
-from PyQt6.QtGui import QFont, QColor, QPixmap, QKeySequence, QShortcut
+from PyQt6.QtCore import (
+    Qt, QThread, pyqtSignal, pyqtSlot, QEvent, QSize, QRectF, QLineF,
+    QByteArray, QVariantAnimation
+)
+from PyQt6.QtGui import (
+    QFont, QColor, QPixmap, QKeySequence, QShortcut, QPainter, QBrush, QIcon, QPen
+)
+from PyQt6.QtSvg import QSvgRenderer
 
 # TWAIN eliminado. WIA se cargará dinámicamente usando win32com.client
 
@@ -590,7 +597,10 @@ WIA_INTENT_COLOR            = 1
 WIA_INTENT_MAXIMIZE_QUALITY = 131072
 WIA_INTENT_MINIMIZE_SIZE    = 65536
 
-SCAN_DPI = 300
+SCAN_DPI = 300  # valor por defecto; se cambia con la barra de calidad
+# Resoluciones que ofrece la barra. Son las que casi cualquier driver WIA
+# acepta; si el escaner rechaza una, la captura directa lo informa en el log.
+DPI_OPCIONES = (100, 150, 200, 300, 400, 600)
 
 
 def _wia_prop(collection, prop_id):
@@ -721,15 +731,17 @@ def _warn_if_low_res(raw_path, expected_dpi, log_signal):
 
 class ScannerThread(QThread):
     log_signal = pyqtSignal(str)
-    image_signal = pyqtSignal(str)
+    image_signal = pyqtSignal(str, bool)  # ruta final, documento detectado
     finished_signal = pyqtSignal()
 
-    def __init__(self, scanner_name, output_path, debug_mode, is_first_scan=False, manual_mode=False):
+    def __init__(self, scanner_name, output_path, debug_mode, is_first_scan=False,
+                 manual_mode=False, dpi=SCAN_DPI):
         super().__init__()
         self.scanner_name = scanner_name
         self.output_path = output_path
         self.debug_mode = debug_mode
         self.is_first_scan = is_first_scan
+        self.dpi = dpi
         self.manual_mode = manual_mode
 
     def run(self):
@@ -760,8 +772,8 @@ class ScannerThread(QThread):
                     self.log_signal.emit("No se encontró un escáner utilizable.")
                 else:
                     try:
-                        w, h = acquire_wia_direct(dev_info, raw_path, SCAN_DPI, self.log_signal)
-                        self.log_signal.emit(f"Captura directa WIA a {SCAN_DPI} dpi: {w}x{h} px.")
+                        w, h = acquire_wia_direct(dev_info, raw_path, self.dpi, self.log_signal)
+                        self.log_signal.emit(f"Captura directa WIA a {self.dpi} dpi: {w}x{h} px.")
                         acquired = True
                     except Exception as e:
                         self.log_signal.emit(
@@ -771,6 +783,7 @@ class ScannerThread(QThread):
             # --- Fallback: diálogo nativo (y modo manual) ---
             if not acquired:
                 import threading
+                dpi = self.dpi
 
                 def auto_clicker(first_scan):
                     import time
@@ -794,7 +807,7 @@ class ScannerThread(QThread):
                             for _ in range(4):
                                 shell.SendKeys("{TAB}")
                                 time.sleep(0.1)
-                            shell.SendKeys(str(SCAN_DPI))
+                            shell.SendKeys(str(dpi))
                             time.sleep(0.1)
                             shell.SendKeys("{ENTER}")
                             time.sleep(0.8)  # Esperar cierre de ventana
@@ -833,7 +846,7 @@ class ScannerThread(QThread):
                     self.log_signal.emit("Escaneo cancelado.")
 
             if acquired:
-                _warn_if_low_res(raw_path, SCAN_DPI, self.log_signal)
+                _warn_if_low_res(raw_path, self.dpi, self.log_signal)
 
                 self.log_signal.emit("Procesando imagen (Enderezado y recorte automático)...")
                 final_path, detectado = process_and_crop(
@@ -852,7 +865,7 @@ class ScannerThread(QThread):
                         )
 
                 if final_path:
-                    self.image_signal.emit(final_path)
+                    self.image_signal.emit(final_path, detectado)
 
             pythoncom.CoUninitialize()
 
@@ -897,12 +910,19 @@ def load_config():
         return {}
 
 
-def save_config(output_dir, file_prefix):
-    """Devuelve (ok, detalle) para poder informarlo en el log."""
+def save_config(**cambios):
+    """
+    Guarda solo las claves que se pasan y conserva el resto. Importa cuando el
+    destino configurado no esta disponible: cambiar la calidad en ese momento
+    no tiene que pisar la carpeta guardada con la temporal.
+
+    Devuelve (ok, detalle) para poder informarlo en el log.
+    """
     try:
+        cfg = load_config()
+        cfg.update(cambios)
         with open(_config_path(), "w", encoding="utf-8") as f:
-            json.dump({"output_dir": output_dir, "file_prefix": file_prefix},
-                      f, indent=2, ensure_ascii=False)
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
         return True, _config_path()
     except Exception as e:
         return False, str(e)
@@ -949,6 +969,309 @@ class SettingsDialog(QDialog):
         if d:
             self.txt_dir.setText(d)
 
+# Iconos de linea (trazos de Tabler Icons, licencia MIT), en una grilla de
+# 24x24. Reemplazan a los emoji, que cada version de Windows dibuja distinto y
+# a color. Se guardan como texto y se pintan con el color que haga falta.
+ICONOS = {
+    "carpeta": '<path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2"/>',
+    "archivo": '<path d="M14 3v4a1 1 0 0 0 1 1h4"/>'
+               '<path d="M5 13v-8a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2h-5.5m-9.5 -2h7m-3 -3l3 3l-3 3"/>',
+    "bicho": '<path d="M9 9v-1a3 3 0 0 1 6 0v1"/>'
+             '<path d="M8 9h8a6 6 0 0 1 1 3v3a5 5 0 0 1 -10 0v-3a6 6 0 0 1 1 -3"/>'
+             '<path d="M3 13l4 0"/><path d="M17 13l4 0"/><path d="M12 20l0 -6"/>'
+             '<path d="M4 19l3.35 -2"/><path d="M20 19l-3.35 -2"/>'
+             '<path d="M4 7l3.75 2.4"/><path d="M20 7l-3.75 2.4"/>',
+    "ajustes": '<path d="M14 6m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"/><path d="M4 6l8 0"/><path d="M16 6l4 0"/>'
+               '<path d="M8 12m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"/><path d="M4 12l2 0"/><path d="M10 12l10 0"/>'
+               '<path d="M17 18m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"/><path d="M4 18l11 0"/><path d="M19 18l1 0"/>',
+    "flecha_derecha": '<path d="M9 6l6 6l-6 6"/>',
+    "flecha_abajo": '<path d="M6 9l6 6l6 -6"/>',
+    "tilde": '<path d="M5 12l5 5l10 -10"/>',
+    "alerta": '<path d="M12 9v4"/>'
+              '<path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z"/>'
+              '<path d="M12 16h.01"/>',
+}
+
+
+def icon_pixmap(nombre, color, size=16):
+    """El icono como QPixmap de `size` px logicos, nitido a cualquier escala de pantalla."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+        f'stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+        f'{ICONOS[nombre]}</svg>'
+    )
+    app = QApplication.instance()
+    dpr = app.devicePixelRatio() if app else 1.0
+    lado = max(1, round(size * dpr))
+    pixmap = QPixmap(lado, lado)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    QSvgRenderer(QByteArray(svg.encode("utf-8"))).render(painter)
+    painter.end()
+    pixmap.setDevicePixelRatio(dpr)
+    return pixmap
+
+
+def icon(nombre, color, size=16):
+    return QIcon(icon_pixmap(nombre, color, size))
+
+
+class QualitySlider(QWidget):
+    """
+    Barra de calidad: una pista con forma de pastilla y marcas de regla, y un
+    tirador claro que se mueve entre los valores permitidos.
+
+    Los valores no son continuos (un driver de escaner acepta solo ciertas
+    resoluciones), asi que el tirador salta al permitido mas cercano. Las
+    marcas altas son esos valores; las bajas solo dan la escala.
+    """
+    valueChanged = pyqtSignal(int)
+
+    def __init__(self, valores, valor, paso_marcas=25, parent=None):
+        super().__init__(parent)
+        self._valores = sorted(valores)
+        self._valor = valor if valor in self._valores else self._valores[0]
+        self._paso_marcas = paso_marcas
+        self._foco_teclado = False
+        self.setFixedHeight(22)
+        self.setMinimumWidth(140)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
+
+    def sizeHint(self):
+        return QSize(230, 22)
+
+    def value(self):
+        return self._valor
+
+    def setValue(self, valor):
+        if valor in self._valores and valor != self._valor:
+            self._valor = valor
+            self.update()
+            self.valueChanged.emit(valor)
+
+    # El tirador no llega al borde de la pista: queda este margen a cada lado.
+    _MARGEN = 12
+
+    def _x_de(self, valor):
+        lo, hi = self._valores[0], self._valores[-1]
+        ancho = self.width() - 2 * self._MARGEN
+        return self._MARGEN + ancho * (valor - lo) / (hi - lo)
+
+    def _valor_en(self, x):
+        return min(self._valores, key=lambda v: abs(self._x_de(v) - x))
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        h = self.height()
+        pista = QRectF(0.5, 0.5, self.width() - 1, h - 1)
+        p.setPen(QPen(QColor("#007ACC" if self._foco_teclado else "#3A3A3A"), 1))
+        p.setBrush(QColor("#2A2A2A"))
+        p.drawRoundedRect(pista, h / 2, h / 2)
+
+        # Marcas de regla. Lo ya "recorrido" (a la izquierda del tirador) va
+        # mas claro, para que la posicion se lea de un vistazo.
+        lo, hi = self._valores[0], self._valores[-1]
+        x_tirador = self._x_de(self._valor)
+        v = lo
+        while v <= hi:
+            x = round(self._x_de(v)) + 0.5  # al centro del píxel: línea nítida
+            permitido = v in self._valores
+            alto = 10 if permitido else 5
+            if x <= x_tirador:
+                color = "#9A9A9A" if permitido else "#6A6A6A"
+            else:
+                color = "#6A6A6A" if permitido else "#474747"
+            p.setPen(QPen(QColor(color), 1))
+            p.drawLine(QLineF(x, (h - alto) / 2, x, (h + alto) / 2))
+            v += self._paso_marcas
+
+        # Tirador: una pastilla clara con una sombra corta debajo.
+        ancho_t, alto_t = 12, h - 6
+        tirador = QRectF(x_tirador - ancho_t / 2, (h - alto_t) / 2, ancho_t, alto_t)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 90))
+        p.drawRoundedRect(tirador.translated(0, 1.5), 5, 5)
+        p.setBrush(QColor("#FFFFFF" if self.underMouse() else "#EDEDED"))
+        p.drawRoundedRect(tirador, 5, 5)
+
+    # El tirador sigue al cursor sin animacion: es un ajuste directo, y
+    # cualquier demora entre la mano y la pantalla se siente como lag.
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._foco_teclado = False
+            self.setValue(self._valor_en(event.position().x()))
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self.setValue(self._valor_en(event.position().x()))
+
+    def enterEvent(self, event):
+        self.update()
+
+    def leaveEvent(self, event):
+        self.update()
+
+    def keyPressEvent(self, event):
+        i = self._valores.index(self._valor)
+        tecla = event.key()
+        if tecla in (Qt.Key.Key_Left, Qt.Key.Key_Down):
+            i = max(i - 1, 0)
+        elif tecla in (Qt.Key.Key_Right, Qt.Key.Key_Up):
+            i = min(i + 1, len(self._valores) - 1)
+        elif tecla == Qt.Key.Key_Home:
+            i = 0
+        elif tecla == Qt.Key.Key_End:
+            i = len(self._valores) - 1
+        else:
+            super().keyPressEvent(event)
+            return
+        self.setValue(self._valores[i])
+
+    def focusInEvent(self, event):
+        # El aro de foco solo cuando se llega con el teclado.
+        self._foco_teclado = event.reason() in (
+            Qt.FocusReason.TabFocusReason, Qt.FocusReason.BacktabFocusReason)
+        self.update()
+
+    def focusOutEvent(self, event):
+        self._foco_teclado = False
+        self.update()
+
+
+class BusyBar(QWidget):
+    """
+    Barra de espera sin porcentaje: un segmento que cruza de izquierda a
+    derecha a velocidad constante mientras dura el escaneo. No hay forma de
+    saber cuanto falta (el escaner no lo informa), solo que sigue trabajando.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(220, 4)
+        self._fase = 0.0
+        self._anim = QVariantAnimation(self)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setDuration(1200)
+        self._anim.setLoopCount(-1)
+        self._anim.valueChanged.connect(self._avanzar)
+        self.hide()
+
+    def _avanzar(self, fase):
+        self._fase = fase
+        self.update()
+
+    def start(self):
+        self.show()
+        # Si Windows tiene las animaciones desactivadas, queda la barra quieta.
+        if QApplication.isEffectEnabled(Qt.UIEffect.UI_AnimateCombo):
+            self._anim.start()
+
+    def stop(self):
+        self._anim.stop()
+        self.hide()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        w, h = self.width(), self.height()
+        p.setBrush(QColor("#2D2D30"))
+        p.drawRoundedRect(QRectF(0, 0, w, h), h / 2, h / 2)
+        p.setBrush(QColor("#D84315"))
+        if self._anim.state() == QVariantAnimation.State.Running:
+            largo = 0.35 * w
+            x = -largo + self._fase * (w + largo)
+            p.setClipRect(QRectF(0, 0, w, h))
+            p.drawRoundedRect(QRectF(x, 0, largo, h), h / 2, h / 2)
+        else:
+            p.drawRoundedRect(QRectF(0, 0, w, h), h / 2, h / 2)
+
+
+class FlatComboBox(QComboBox):
+    """
+    Desplegable plano. El que dibuja Windows por defecto trae un botón con
+    relieve y una flecha negra que no pegan con el resto de la ventana; acá el
+    marco lo pone la hoja de estilos y la flecha se dibuja a mano.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._flecha = icon_pixmap("flecha_abajo", "#9A9A9A", 14)
+        # Con este delegado la lista desplegada respeta la hoja de estilos
+        # (alto y color de cada renglón).
+        self.setItemDelegate(QStyledItemDelegate(self))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.drawPixmap(self.width() - 14 - 10, (self.height() - 14) // 2, self._flecha)
+
+
+# Versión corta de los avisos y errores del registro, para la línea de abajo.
+# Lo que no está en la lista se resume cortando en la primera pausa.
+_AVISOS_CORTOS = (
+    ("no acepto", "El escáner no aceptó esa resolución"),
+    ("toca el borde", "El documento toca el borde"),
+    ("no se detecto el documento", "No se detectó el documento"),
+    ("muy por debajo", "Resolución más baja que la pedida"),
+    ("destino configurado no está disponible", "Destino no disponible"),
+    ("No se detectó ningún escáner", "No hay escáner conectado"),
+    ("Error durante el escaneo", "Error al escanear"),
+    ("Error en procesamiento", "Error al procesar la imagen"),
+    ("Error procesando imagen local", "Error al procesar el archivo"),
+    ("no se pudo guardar", "No se pudo guardar la configuración"),
+)
+
+
+def _aviso_corto(message):
+    for clave, corto in _AVISOS_CORTOS:
+        if clave in message:
+            return corto
+    texto = message.split(": ", 1)[-1] if message.startswith("AVISO") else message
+    for corte in (". ", " (", ": "):
+        texto = texto.split(corte, 1)[0]
+    texto = texto.rstrip(".")
+    return texto[:1].upper() + texto[1:]
+
+
+def _fmt_mb(mb):
+    """Tamaño en MB como se escribe aca: con coma, y sin decimales desde 10."""
+    return (f"{mb:.0f} MB" if mb >= 10 else f"{mb:.1f} MB").replace(".", ",")
+
+
+class ElidedLabel(QLabel):
+    """
+    Etiqueta de una linea que recorta el texto con "…" cuando no entra, en vez
+    de imponerle su ancho a la ventana. Avisa cuando le hacen clic.
+    """
+    clicked = pyqtSignal()
+
+    def __init__(self, text="", mode=Qt.TextElideMode.ElideRight, parent=None):
+        super().__init__(text, parent)
+        self._mode = mode
+
+    def minimumSizeHint(self):
+        return QSize(20, super().minimumSizeHint().height())
+
+    def paintEvent(self, event):
+        rect = self.contentsRect()
+        text = self.fontMetrics().elidedText(self.text(), self._mode, rect.width())
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.pos()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 class ScannerApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -976,7 +1299,18 @@ class ScannerApp(QMainWindow):
 
         self.is_first_scan = True
         self._preview_pixmap = None
-            
+
+        self.scan_dpi = cfg.get("scan_dpi")
+        if self.scan_dpi not in DPI_OPCIONES:
+            self.scan_dpi = SCAN_DPI
+        self._dpi_ultimo_escaneo = None   # resolución que ya se le pasó al robot
+        self._dpi_en_curso = None         # resolución del escaneo que se está mostrando
+        self._inicio_escaneo = None       # para informar cuánto tardó
+        # Tamaño de archivo de referencia, llevado a 300 dpi, para estimar el
+        # de las otras resoluciones. Arranca con el de una ficha típica y se
+        # corrige con cada escaneo real.
+        self._mb_a_300 = 4.4
+
         self.setup_ui()
         self.apply_dark_theme()
         
@@ -987,44 +1321,81 @@ class ScannerApp(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(15)
 
-        # Top Bar (Scanner Select & Config)
+        # Top Bar (Scanner Select & herramientas)
         top_layout = QHBoxLayout()
-        self.cb_scanner = QComboBox()
+        self.cb_scanner = FlatComboBox()
         self.cb_scanner.setFixedWidth(200)
         self.populate_scanners()
-        
-        btn_config = QPushButton("⚙️ Configurar Destino")
-        btn_config.clicked.connect(self.open_settings)
-        btn_config.setObjectName("secondaryButton")
-        
-        self.btn_debug = QPushButton("🐛")
+
+        self.btn_debug = QPushButton()
+        self.btn_debug.setIcon(icon("bicho", "#CCCCCC", 18))
+        self.btn_debug.setIconSize(QSize(18, 18))
         self.btn_debug.setCheckable(True)
         self.btn_debug.setObjectName("debugButton")
-        self.btn_debug.setToolTip("Activar Modo Debug (Guarda imágenes para diagnóstico)")
+        self.btn_debug.setToolTip(
+            "Modo debug: guarda imágenes de diagnóstico y muestra «Procesar archivo»"
+        )
 
         # Reprocesar un archivo ya escaneado. Sirve sobre todo para analizar un
-        # _raw.bmp que quedó guardado porque la detección falló: con 🐛 activo
-        # genera una máscara por estrategia y muestra en cuál se rompió.
-        btn_local = QPushButton("📂 Procesar archivo")
-        btn_local.setObjectName("secondaryButton")
-        btn_local.setToolTip(
-            "Procesa una imagen existente sin escanear. Con el modo debug activo "
-            "genera las máscaras de diagnóstico de cada estrategia de detección."
+        # _raw.bmp que quedó guardado porque la detección falló: genera una
+        # máscara por estrategia y muestra en cuál se rompió. Es una
+        # herramienta de diagnóstico, así que solo aparece con el modo debug.
+        self.btn_local = QPushButton(" Procesar archivo")
+        self.btn_local.setIcon(icon("archivo", "#CCCCCC"))
+        self.btn_local.setIconSize(QSize(16, 16))
+        self.btn_local.setObjectName("secondaryButton")
+        self.btn_local.setToolTip(
+            "Procesa una imagen existente sin escanear y genera las máscaras de "
+            "diagnóstico de cada estrategia de detección."
         )
-        btn_local.clicked.connect(self.process_local_image)
+        self.btn_local.clicked.connect(self.process_local_image)
+        self.btn_local.setVisible(False)
+        self.btn_debug.toggled.connect(self.btn_local.setVisible)
 
-        top_layout.addWidget(QLabel("Escáner:"))
+        lbl_escaner = QLabel("Escáner")
+        lbl_escaner.setObjectName("mutedLabel")
+        top_layout.addWidget(lbl_escaner)
         top_layout.addWidget(self.cb_scanner)
         top_layout.addStretch()
-        top_layout.addWidget(btn_local)
-        top_layout.addWidget(btn_config)
+        top_layout.addWidget(self.btn_local)
         top_layout.addWidget(self.btn_debug)
         main_layout.addLayout(top_layout)
 
+        # Destino: la carpeta a la vista y, al lado, el acceso para cambiarla.
+        # Un clic en cualquiera de los dos abre la configuración.
+        destino_layout = QHBoxLayout()
+        destino_layout.setSpacing(8)
+        lbl_carpeta = QLabel()
+        lbl_carpeta.setPixmap(icon_pixmap("carpeta", "#9A9A9A"))
+        self.lbl_destino = ElidedLabel(mode=Qt.TextElideMode.ElideMiddle)
+        self.lbl_destino.setObjectName("destinoPath")
+        self.lbl_destino.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_destino.setToolTip("Carpeta donde se guardan los escaneos. Clic para cambiarla.")
+        self.lbl_destino.clicked.connect(self.open_settings)
+        btn_destino = QPushButton("Cambiar destino")
+        btn_destino.setObjectName("linkButton")
+        btn_destino.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_destino.clicked.connect(self.open_settings)
+        destino_layout.addWidget(lbl_carpeta)
+        destino_layout.addWidget(self.lbl_destino)
+        destino_layout.addWidget(btn_destino)
+        destino_layout.addStretch()
+        main_layout.addLayout(destino_layout)
+        self.update_destino_label()
+
         # Center Preview
-        self.lbl_preview = QLabel("Presiona ENTER o haz clic en 'INICIAR ESCANEO'")
+        self.lbl_preview = QLabel("Poné el documento en la cama y presioná Enter")
         self.lbl_preview.setObjectName("previewCanvas")
         self.lbl_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Sombra de la imagen. El visor no tiene fondo propio, así que la
+        # sombra toma la forma de lo único que pinta: la imagen. Se apaga
+        # cuando hay un mensaje, para no sombrear el texto.
+        self.preview_shadow = QGraphicsDropShadowEffect(self.lbl_preview)
+        self.preview_shadow.setBlurRadius(48)
+        self.preview_shadow.setOffset(0, 12)
+        self.preview_shadow.setColor(QColor(0, 0, 0, 230))
+        self.preview_shadow.setEnabled(False)
+        self.lbl_preview.setGraphicsEffect(self.preview_shadow)
         # Ignored en ambos ejes: sin esto el sizeHint del label crece con el
         # pixmap que se le pone, y el tamaño de la vista previa termina
         # dependiendo de la imagen anterior y del historial de resizes.
@@ -1034,28 +1405,58 @@ class ScannerApp(QMainWindow):
         # Se escucha el resize del label, no el de la ventana: el label se
         # redimensiona después, cuando el layout ya repartió el espacio.
         self.lbl_preview.installEventFilter(self)
+        # Barra de espera, centrada bajo el mensaje mientras dura el escaneo.
+        self.busy_bar = BusyBar(self.lbl_preview)
         main_layout.addWidget(self.lbl_preview, stretch=1)
 
-        # Scan Button
-        self.btn_scan = QPushButton("INICIAR ESCANEO (Enter)")
-        self.btn_scan.setObjectName("primaryButton")
-        self.btn_scan.setStyleSheet("background-color: #D84315; border-radius: 6px;")
-        self.btn_scan.setFixedHeight(60)
+        # Pie de la imagen: nombre del archivo, cuánto tardó y cuánto pesa,
+        # centrado bajo la imagen. La fila conserva su alto aunque esté
+        # vacía, para que el botón de escaneo no salte de lugar cuando
+        # aparece la imagen.
+        pie_imagen = QWidget()
+        pie_imagen.setFixedHeight(20)
+        pie_imagen_layout = QHBoxLayout(pie_imagen)
+        pie_imagen_layout.setContentsMargins(0, 0, 0, 0)
+        self.lbl_info = ElidedLabel(mode=Qt.TextElideMode.ElideMiddle)
+        self.lbl_info.setObjectName("captionInfo")
+        pie_imagen_layout.addStretch()
+        pie_imagen_layout.addWidget(self.lbl_info)
+        pie_imagen_layout.addStretch()
+        main_layout.addWidget(pie_imagen)
+        self.lbl_info.setVisible(False)
+
+        # Scan Button. El texto y la tecla van como etiquetas adentro del
+        # botón, para poder dibujar "Enter" como una tecla.
+        self.btn_scan = QPushButton()
+        self.btn_scan.setObjectName("scanButton")
+        self.btn_scan.setFixedHeight(56)
         self.btn_scan.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_scan.clicked.connect(self.start_scan)
         self.btn_scan.setToolTip("Inicia el escaneo seleccionando automáticamente la Configuración Personalizada")
-        
-        self.btn_manual = QPushButton("⚙")
-        self.btn_manual.setFixedWidth(50)
-        self.btn_manual.setFixedHeight(60)
+        self.lbl_scan = QLabel("Iniciar escaneo")
+        self.lbl_scan.setObjectName("scanText")
+        self.lbl_scan_key = QLabel("Enter")
+        self.lbl_scan_key.setObjectName("scanKey")
+        scan_inner = QHBoxLayout(self.btn_scan)
+        scan_inner.setSpacing(10)
+        scan_inner.addStretch()
+        for etiqueta in (self.lbl_scan, self.lbl_scan_key):
+            etiqueta.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            scan_inner.addWidget(etiqueta, alignment=Qt.AlignmentFlag.AlignVCenter)
+        scan_inner.addStretch()
+
+        self.btn_manual = QPushButton()
+        self.btn_manual.setIcon(icon("ajustes", "#CCCCCC", 20))
+        self.btn_manual.setIconSize(QSize(20, 20))
+        self.btn_manual.setFixedSize(56, 56)
         self.btn_manual.setObjectName("secondaryButton")
         self.btn_manual.setToolTip("Modo Manual: Abre la ventana sin robot para que lo inspecciones")
         self.btn_manual.clicked.connect(self.start_scan_manual)
-        
+
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(self.btn_scan, stretch=1)
         btn_layout.addWidget(self.btn_manual)
-        
+
         main_layout.addLayout(btn_layout)
 
         # Shortcut for Enter key
@@ -1064,6 +1465,54 @@ class ScannerApp(QMainWindow):
         self.shortcut_enter2 = QShortcut(QKeySequence("Enter"), self)
         self.shortcut_enter2.activated.connect(self.start_scan)
 
+        # Pie de la ventana. A la izquierda, la calidad (resolución del
+        # escaneo). A la derecha, el botón que despliega el registro, que
+        # arranca escondido. Entre los dos solo aparece algo cuando hay un
+        # aviso o un error, y en pocas palabras: lo de rutina no se muestra.
+        pie_layout = QHBoxLayout()
+        pie_layout.setSpacing(10)
+        lbl_calidad = QLabel("Calidad")
+        lbl_calidad.setObjectName("mutedLabel")
+        self.slider_dpi = QualitySlider(DPI_OPCIONES, self.scan_dpi)
+        self.slider_dpi.setToolTip(
+            "Resolución del escaneo. Más resolución da más detalle, pero el "
+            "archivo pesa más y el escaneo tarda más."
+        )
+        self.slider_dpi.valueChanged.connect(self.on_dpi_changed)
+        self.lbl_dpi = QLabel()
+        self.lbl_dpi.setObjectName("valueLabel")
+        self.lbl_peso = QLabel()
+        self.lbl_peso.setObjectName("mutedLabel")
+        self.lbl_peso.setToolTip("Tamaño estimado de cada archivo, calculado a partir del último escaneo")
+        self.update_quality_labels()
+        # Ancho reservado para el texto más largo: si no, la barra se corre
+        # cada vez que cambia la cantidad de cifras.
+        self.lbl_dpi.setMinimumWidth(52)
+        self.lbl_peso.setMinimumWidth(70)
+
+        self.btn_log = QPushButton(" Registro")
+        self.btn_log.setObjectName("linkButton")
+        self.btn_log.setCheckable(True)
+        self.btn_log.setIconSize(QSize(14, 14))
+        self.btn_log.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_log.setToolTip("Muestra u oculta el registro de mensajes")
+        self.btn_log.toggled.connect(self.toggle_log)
+        self.lbl_status_icon = QLabel()
+        self.lbl_status = ElidedLabel()
+        self.lbl_status.setObjectName("statusLine")
+
+        pie_layout.addWidget(lbl_calidad)
+        pie_layout.addWidget(self.slider_dpi)
+        pie_layout.addWidget(self.lbl_dpi)
+        pie_layout.addWidget(self.lbl_peso)
+        pie_layout.addStretch()
+        pie_layout.addWidget(self.lbl_status_icon)
+        pie_layout.addWidget(self.lbl_status)
+        pie_layout.addSpacing(6)
+        pie_layout.addWidget(self.btn_log)
+        main_layout.addLayout(pie_layout)
+        self.clear_warning()
+
         # Console
         self.console = QTextEdit()
         self.console.setObjectName("consoleOutput")
@@ -1071,6 +1520,7 @@ class ScannerApp(QMainWindow):
         self.console.setFixedHeight(100)
         self.console.document().setMaximumBlockCount(100) # Limita el log a 100 mensajes
         main_layout.addWidget(self.console)
+        self.toggle_log(False)
 
         if not self.destino_disponible:
             self.log_to_console(
@@ -1109,9 +1559,10 @@ class ScannerApp(QMainWindow):
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
             self.destino_disponible = True
+            self.update_destino_label()
             self.log_to_console(f"Destino actualizado: {self.output_dir}")
 
-            ok, detalle = save_config(self.output_dir, self.file_prefix)
+            ok, detalle = save_config(output_dir=self.output_dir, file_prefix=self.file_prefix)
             if ok:
                 self.log_to_console("Configuración guardada: se va a recordar al reiniciar.")
             else:
@@ -1137,51 +1588,132 @@ class ScannerApp(QMainWindow):
             counter += 1
         return os.path.join(self.output_dir, f"{self.file_prefix}{counter}.png")
 
+    def update_destino_label(self):
+        self.lbl_destino.setText(os.path.normpath(self.output_dir))
+
+    def update_quality_labels(self):
+        """Resolución elegida y cuánto va a pesar, aproximadamente, cada archivo."""
+        self.lbl_dpi.setText(f"{self.scan_dpi} dpi")
+        # El tamaño crece con la cantidad de píxeles, o sea con el cuadrado
+        # de la resolución.
+        self.lbl_peso.setText("≈ " + _fmt_mb(self._mb_a_300 * (self.scan_dpi / 300) ** 2))
+
+    def on_dpi_changed(self, dpi):
+        self.scan_dpi = dpi
+        self.update_quality_labels()
+        ok, detalle = save_config(scan_dpi=dpi)
+        if not ok:
+            self.log_to_console(f"AVISO: no se pudo guardar la calidad elegida ({detalle}).")
+
+    def toggle_log(self, visible):
+        self.console.setVisible(visible)
+        self.btn_log.setIcon(icon("flecha_abajo" if visible else "flecha_derecha", "#569CD6", 14))
+        if visible:
+            self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+
+    def show_warning(self, message, color):
+        """Aviso o error en pocas palabras, al pie. El texto completo queda en el registro."""
+        self.lbl_status_icon.setPixmap(icon_pixmap("alerta", color, 14))
+        self.lbl_status.setStyleSheet(f"color: {color};")
+        self.lbl_status.setText(_aviso_corto(message))
+        self.lbl_status.setToolTip(message)
+        self.lbl_status_icon.setVisible(True)
+        self.lbl_status.setVisible(True)
+
+    def clear_warning(self):
+        self.lbl_status_icon.setVisible(False)
+        self.lbl_status.setVisible(False)
+
     @pyqtSlot(str)
     def log_to_console(self, message):
+        # Avisos y errores en color. Son lo único que además se muestra al
+        # pie de la ventana; el resto queda solo en el registro.
+        if message.startswith("AVISO") or message.startswith("Captura directa no disponible"):
+            color = "#F0C36B"
+        elif message.startswith("Error"):
+            color = "#F48771"
+        else:
+            color = None
+
+        # El color va siempre explícito: si no, el renglón hereda el del
+        # anterior y todo lo que sigue a un aviso sale en ámbar.
         timestamp = time.strftime("%H:%M:%S")
-        self.console.append(f"<span style='color:#569CD6;'>[{timestamp}]</span> {message}")
+        texto = f"<span style='color:{color or '#CCCCCC'};'>{html.escape(message)}</span>"
+        self.console.append(f"<span style='color:#569CD6;'>[{timestamp}]</span> {texto}")
         self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+
+        if color:
+            self.show_warning(message, color)
+
+    def set_scanning(self, activo, mensaje=""):
+        """Estado de la ventana mientras hay un escaneo en curso."""
+        self.btn_scan.setEnabled(not activo)
+        self.btn_manual.setEnabled(not activo)
+        self.lbl_scan.setText("Escaneando…" if activo else "Iniciar escaneo")
+        self.lbl_scan_key.setVisible(not activo)
+        if activo:
+            # Los avisos del escaneo anterior ya no corresponden.
+            self.clear_warning()
+            self.set_preview_text(mensaje)
+            self.place_busy_bar()
+            self.busy_bar.start()
+        else:
+            self.busy_bar.stop()
 
     def start_scan(self):
         if not self.btn_scan.isEnabled():
             return
-            
-        self.btn_scan.setEnabled(False)
-        self.set_preview_text("Escaneando...")
-        
+
+        self.set_scanning(True, "Escaneando…")
+
         scanner = self.cb_scanner.currentText()
         out_path = self.get_next_filename()
         debug_active = self.btn_debug.isChecked()
-        
-        self.thread = ScannerThread(scanner, out_path, debug_active, self.is_first_scan)
+
+        # Si la captura directa no está disponible, el robot del diálogo
+        # nativo tipea la resolución solo en el primer escaneo. Cuando la
+        # resolución cambió, tiene que volver a tipearla.
+        primero = self.is_first_scan or self.scan_dpi != self._dpi_ultimo_escaneo
+        self._dpi_ultimo_escaneo = self.scan_dpi
+        self._dpi_en_curso = self.scan_dpi
+        self._inicio_escaneo = time.perf_counter()
+
+        self.thread = ScannerThread(scanner, out_path, debug_active, primero, dpi=self.scan_dpi)
         self.is_first_scan = False
         self.thread.log_signal.connect(self.log_to_console)
         self.thread.image_signal.connect(self.display_image)
         self.thread.finished_signal.connect(self.scan_finished)
         self.thread.start()
 
-    def scan_finished(self):
-        self.btn_scan.setEnabled(True)
-        if self.lbl_preview.text() in ["Escaneando...", "Modo Manual Activo..."]:
-            self.set_preview_text("Listo para el siguiente escaneo.")
-
     def start_scan_manual(self):
         if not self.btn_scan.isEnabled():
             return
-            
-        self.btn_scan.setEnabled(False)
-        self.set_preview_text("Modo Manual Activo...")
-        
+
+        self.set_scanning(True, "Modo manual activo…")
+
         scanner = self.cb_scanner.currentText()
         out_path = self.get_next_filename()
         debug_active = self.btn_debug.isChecked()
-        
-        self.thread = ScannerThread(scanner, out_path, debug_active, is_first_scan=False, manual_mode=True)
+
+        # En modo manual la resolución la elige el usuario en el diálogo, así
+        # que ese escaneo no sirve para estimar tamaños.
+        self._dpi_en_curso = None
+        self._inicio_escaneo = time.perf_counter()
+
+        self.thread = ScannerThread(scanner, out_path, debug_active, is_first_scan=False,
+                                    manual_mode=True, dpi=self.scan_dpi)
         self.thread.log_signal.connect(self.log_to_console)
         self.thread.image_signal.connect(self.display_image)
         self.thread.finished_signal.connect(self.scan_finished)
         self.thread.start()
+
+    @pyqtSlot()
+    def scan_finished(self):
+        self.set_scanning(False)
+        # Si el escaneo no dejó ninguna imagen (cancelado, error), el visor
+        # no puede quedarse diciendo que sigue escaneando.
+        if self._preview_pixmap is None:
+            self.set_preview_text("Listo para el siguiente escaneo.")
 
     def run_wia_diagnostics(self):
         self.log_to_console("--- INICIANDO MODO ESPÍA WIA ---")
@@ -1320,9 +1852,14 @@ class ScannerApp(QMainWindow):
         if file_path:
             out_path = self.get_next_filename()
             debug_active = self.btn_debug.isChecked()
+            self.clear_warning()
             self.set_preview_text("Procesando imagen local...")
             self.log_to_console(f"Procesando archivo local: {file_path}")
-            
+            # No se sabe a qué resolución se escaneó ese archivo: no sirve
+            # para estimar tamaños.
+            self._dpi_en_curso = None
+            self._inicio_escaneo = time.perf_counter()
+
             try:
                 # process_and_crop espera algo con .emit() (normalmente una
                 # pyqtSignal del hilo de escaneo). Acá ya estamos en el hilo de
@@ -1333,7 +1870,7 @@ class ScannerApp(QMainWindow):
                 final_path, detectado = process_and_crop(
                     file_path, out_path, _LogDirecto(self.log_to_console), debug_active
                 )
-                self.display_image(final_path)
+                self.display_image(final_path, detectado)
                 if debug_active:
                     self.log_to_console(
                         f"Máscaras de diagnóstico escritas en {os.path.dirname(out_path)}"
@@ -1343,18 +1880,50 @@ class ScannerApp(QMainWindow):
                     if detectado else
                     "Procesamiento local terminado SIN detectar documento."
                 )
-                self.set_preview_text("Listo para el siguiente escaneo.")
             except Exception as e:
                 self.log_to_console(f"Error procesando imagen local: {e}")
+                self.set_preview_text("Listo para el siguiente escaneo.")
+
+    def update_caption(self, filepath, detectado):
+        """Pie de la imagen: nombre del archivo, cuánto tardó y cuánto pesa."""
+        partes = [os.path.basename(filepath)]
+        if self._inicio_escaneo is not None:
+            segundos = time.perf_counter() - self._inicio_escaneo
+            partes.append(f"{segundos:.1f} s".replace(".", ","))
+            self._inicio_escaneo = None
+        try:
+            mb = os.path.getsize(filepath) / 1e6
+        except OSError:
+            mb = None
+        if mb is not None:
+            partes.append(_fmt_mb(mb))
+        self.lbl_info.setText("  ·  ".join(partes))
+        self.lbl_info.setToolTip(filepath)
+        self.lbl_info.setVisible(True)
+
+        # Un recorte real a una resolución conocida corrige la estimación de
+        # tamaño de la barra de calidad.
+        if detectado and mb and self._dpi_en_curso:
+            self._mb_a_300 = mb * (300 / self._dpi_en_curso) ** 2
+            self.update_quality_labels()
 
     def set_preview_text(self, mensaje):
         """Mensaje en el visor, descartando la imagen que hubiera."""
         self._preview_pixmap = None
+        self.preview_shadow.setEnabled(False)
+        self.lbl_info.setVisible(False)
         self.lbl_preview.setText(mensaje)
+
+    def place_busy_bar(self):
+        """La barra de espera, centrada un poco por debajo del mensaje."""
+        area = self.lbl_preview.contentsRect()
+        self.busy_bar.move(area.center().x() - self.busy_bar.width() // 2,
+                           area.center().y() + 22)
 
     def eventFilter(self, obj, event):
         if obj is self.lbl_preview and event.type() == QEvent.Type.Resize:
             self.render_preview()
+            self.place_busy_bar()
         return super().eventFilter(obj, event)
 
     def render_preview(self):
@@ -1365,17 +1934,39 @@ class ScannerApp(QMainWindow):
         """
         if self._preview_pixmap is None or self._preview_pixmap.isNull():
             return
-        area = self.lbl_preview.contentsRect().size()
+        # Margen libre alrededor de la imagen: es donde cae la sombra.
+        margen = 32
+        area = self.lbl_preview.contentsRect().size() - QSize(2 * margen, 2 * margen)
         if area.width() < 2 or area.height() < 2:
             return
-        self.lbl_preview.setPixmap(self._preview_pixmap.scaled(
-            area,
+        # Se escala en píxeles físicos: en una pantalla con escala de Windows
+        # al 125 o 150 %, hacerlo en píxeles lógicos dejaba la imagen borrosa.
+        dpr = self.lbl_preview.devicePixelRatioF()
+        scaled = self._preview_pixmap.scaled(
+            area * dpr,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
-        ))
+        )
 
-    @pyqtSlot(str)
-    def display_image(self, filepath):
+        # Esquinas apenas redondeadas. Se pinta la imagen como relleno de un
+        # rectángulo redondeado (y no con un recorte) para que el borde salga
+        # suavizado.
+        rounded = QPixmap(scaled.size())
+        rounded.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(rounded)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(scaled))
+        radio = 6 * dpr
+        painter.drawRoundedRect(QRectF(0, 0, scaled.width(), scaled.height()), radio, radio)
+        painter.end()
+        rounded.setDevicePixelRatio(dpr)
+
+        self.lbl_preview.setPixmap(rounded)
+        self.preview_shadow.setEnabled(True)
+
+    @pyqtSlot(str, bool)
+    def display_image(self, filepath, detectado=True):
         pixmap = QPixmap(filepath)
         if pixmap.isNull():
             self.set_preview_text("Error al cargar la imagen.")
@@ -1384,14 +1975,7 @@ class ScannerApp(QMainWindow):
         # escalado degrada la imagen con cada resize.
         self._preview_pixmap = pixmap
         self.render_preview()
-
-    @pyqtSlot()
-    def scan_finished(self):
-        self.btn_scan.setEnabled(True)
-        if hasattr(self, 'btn_scan_auto'):
-            self.btn_scan_auto.setEnabled(True)
-        if self.lbl_preview.text() == "Escaneando...":
-            self.set_preview_text("Listo para el siguiente escaneo.")
+        self.update_caption(filepath, detectado)
 
     def apply_dark_theme(self):
         qss = """
@@ -1401,23 +1985,145 @@ class ScannerApp(QMainWindow):
             font-family: 'Segoe UI', 'Roboto', 'Inter', sans-serif;
             font-size: 13px;
         }
-        QComboBox, QLineEdit {
+        QLineEdit {
             background-color: #3C3C3C;
             border: 1px solid #3C3C3C;
             border-radius: 4px;
             padding: 5px 10px;
             color: #CCCCCC;
         }
-        QComboBox:focus, QLineEdit:focus {
+        QLineEdit:focus {
             border: 1px solid #007ACC;
             background-color: #404040;
         }
+        /* Desplegable plano, con el mismo aspecto que los botones secundarios.
+           La flecha la dibuja FlatComboBox. */
+        QComboBox {
+            background-color: #333333;
+            border: 1px solid #454545;
+            border-radius: 6px;
+            padding: 5px 30px 5px 10px;
+            color: #CCCCCC;
+        }
+        QComboBox:hover {
+            background-color: #404040;
+        }
+        QComboBox:on {
+            border: 1px solid #007ACC;
+        }
+        QComboBox::drop-down {
+            border: none;
+            background: transparent;
+            width: 28px;
+        }
+        QComboBox::down-arrow {
+            image: none;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #2D2D2D;
+            border: 1px solid #454545;
+            padding: 4px;
+            outline: 0;
+            color: #CCCCCC;
+        }
+        QComboBox QAbstractItemView::item {
+            min-height: 26px;
+            padding-left: 8px;
+            border-radius: 4px;
+        }
+        QComboBox QAbstractItemView::item:hover,
+        QComboBox QAbstractItemView::item:selected {
+            background-color: #094771;
+            color: #FFFFFF;
+        }
+        /* Barra de desplazamiento fina, sin flechas. */
+        QScrollBar:vertical {
+            background: transparent;
+            width: 10px;
+            margin: 2px;
+        }
+        QScrollBar::handle:vertical {
+            background: #4A4A4A;
+            border-radius: 3px;
+            min-height: 24px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #5E5E5E;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0;
+        }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            background: transparent;
+        }
         #previewCanvas {
-            background-color: #121212;
-            border: 2px dashed #333333;
-            border-radius: 12px;
+            background: transparent;
+            border: none;
             color: #666666;
             font-size: 14px;
+        }
+        #destinoPath {
+            color: #9A9A9A;
+        }
+        #statusLine {
+            color: #8A8A8A;
+            font-size: 12px;
+        }
+        #linkButton {
+            background: transparent;
+            border: none;
+            color: #569CD6;
+            padding: 2px 2px;
+        }
+        #linkButton:hover {
+            color: #8CC4F2;
+        }
+        #mutedLabel {
+            color: #9A9A9A;
+            font-size: 12px;
+        }
+        #valueLabel {
+            color: #D4D4D4;
+            font-size: 12px;
+        }
+        #captionInfo {
+            color: #CCCCCC;
+            font-size: 12px;
+        }
+        #scanButton {
+            background-color: #D84315;
+            border: none;
+            border-radius: 6px;
+        }
+        #scanButton:hover {
+            background-color: #E5501F;
+        }
+        #scanButton:pressed {
+            background-color: #B5380F;
+        }
+        #scanButton:disabled {
+            background-color: #333333;
+        }
+        #scanText {
+            background: transparent;
+            color: white;
+            font-size: 15px;
+            font-weight: bold;
+        }
+        #scanText:disabled {
+            color: #8A8A8A;
+        }
+        #scanKey {
+            background: transparent;
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 140);
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-size: 11px;
+        }
+        #secondaryButton:disabled {
+            background-color: #2A2A2A;
+            border: 1px solid #383838;
         }
         #primaryButton {
             background-color: #007ACC;

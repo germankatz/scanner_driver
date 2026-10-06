@@ -3,8 +3,8 @@
 [![Build Windows](https://github.com/germankatz/scanner_driver/actions/workflows/build-windows.yml/badge.svg)](https://github.com/germankatz/scanner_driver/actions/workflows/build-windows.yml)
 
 Aplicación de escritorio para digitalizar documentos en lote con un escáner de
-cama plana en Windows. Escanea a resolución fija, detecta el documento sobre la
-cama, lo endereza por transformación de perspectiva y lo guarda recortado y sin
+cama plana en Windows. Escanea a la resolución elegida (300 dpi por defecto),
+detecta el documento sobre la cama, lo endereza y lo guarda recortado y sin
 pérdida, numerando los archivos solo.
 
 Pensada para tandas largas: se escanea con Enter y no hay que tocar el diálogo
@@ -22,7 +22,8 @@ adelante lo son; TWAIN no está soportado).
 ## Uso
 
 1. Elegí el escáner en el desplegable de arriba, o dejá **Auto-Detectar**.
-2. Configurá la carpeta de destino y el prefijo con **⚙️ Configurar Destino**.
+2. La carpeta de destino está a la vista arriba. Para cambiarla, o cambiar el
+   prefijo, hacé clic en la carpeta o en **Cambiar destino**.
 3. Poné el documento en la cama y presioná **Enter** (o el botón de escaneo).
 
 Los archivos se numeran solos como `prefijo1.png`, `prefijo2.png`, etc. Si
@@ -31,6 +32,20 @@ borrás uno del medio, el siguiente escaneo rellena ese hueco.
 Se guardan en **PNG**, que no tiene pérdida: para documentos con texto chico o
 huellas dactilares, JPEG introduce artefactos justo en los bordes de alto
 contraste, que es donde está la información.
+
+Debajo de la imagen queda el nombre del archivo, cuánto tardó el escaneo y
+cuánto pesa.
+
+### Calidad
+
+La barra de abajo a la izquierda elige la resolución del escaneo: 100, 150,
+200, 300, 400 o 600 dpi. Al lado muestra cuánto va a pesar cada archivo,
+estimado a partir del último escaneo. Más resolución da más detalle, pero el
+archivo pesa más (el doble de dpi son cuatro veces más píxeles) y el escáner
+tarda más en recorrer la cama. Se recuerda entre reinicios.
+
+Si el driver del escáner no acepta la resolución elegida, el registro lo avisa
+y la captura cae al diálogo nativo de Windows.
 
 ### Modo manual
 
@@ -47,7 +62,8 @@ reinicios:
 ```json
 {
   "output_dir": "H:\\ruta\\a\\la\\carpeta",
-  "file_prefix": "doc_"
+  "file_prefix": "doc_",
+  "scan_dpi": 300
 }
 ```
 
@@ -57,8 +73,11 @@ configuración**. Cuando la unidad vuelve, sigue escribiendo donde corresponde.
 
 ## Qué dice el log
 
-La consola de abajo reporta cada paso. Vale la pena mirarla en la primera
-corrida de cada jornada:
+El registro reporta cada paso y arranca escondido; **Registro** (abajo a la
+derecha) lo despliega. Con el registro cerrado, lo de rutina no se muestra:
+solo cuando hay un aviso o un error aparece al pie, en pocas palabras (por
+ejemplo, "El documento toca el borde"), y el detalle queda en el registro. Vale
+la pena abrirlo en la primera corrida de cada jornada:
 
 | Mensaje | Significa |
 |---|---|
@@ -76,8 +95,11 @@ corrida de cada jornada:
 en vez de borrarlo. Ese crudo es lo que hace falta para averiguar por qué falló:
 no lo borres.
 
-Para analizarlo sin tener que reproducir el error: activá el botón **🐛** y abrí
-ese `_raw.bmp` con **📂 Procesar archivo**. Escribe un `debug_mask_*.jpg` por
+Para analizarlo sin tener que reproducir el error: activá el modo debug (el
+botón del bicho, arriba a la derecha). Al lado aparece **Procesar archivo**,
+que solo se muestra en ese modo: abrí con él ese `_raw.bmp`. Hace el mismo
+recorte que un escaneo pero sobre un archivo que ya está en disco, lo guarda
+como un archivo nuevo y escribe un `debug_mask_*.jpg` por
 cada estrategia que se intentó, así se ve en cuál se rompió la detección, y un
 `debug_4_contour.jpg` con el contorno aproximado en rojo y el recorte final en
 verde. El log agrega cuántos de los cuatro lados se pudieron medir sobre el
@@ -92,7 +114,7 @@ escáner.
 
 ## Cómo funciona por dentro
 
-**Captura.** Se conecta por WIA y fija `XRES`/`YRES` a 300 dpi por propiedades,
+**Captura.** Se conecta por WIA y fija `XRES`/`YRES` a la resolución elegida por propiedades,
 releyéndolas después para confirmar que el driver las aceptó de verdad. El área
 de escaneo se recalcula desde el tamaño físico de la cama, porque cambiar la
 resolución no siempre reescala el extent y quedarse con el viejo significa
