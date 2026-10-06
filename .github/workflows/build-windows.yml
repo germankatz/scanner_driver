@@ -27,6 +27,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
+      # Las PCs comparan la versión del ejecutable publicado con la suya: un
+      # release cuyo tag no coincide con la del programa no se vería como nuevo.
+      - name: Verificar que el tag coincide con la versión del programa
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $v = python -c "import actualizador; print(actualizador.VERSION)"
+          if ("v$v" -ne "${{ github.ref_name }}") {
+            Write-Error "El tag es ${{ github.ref_name }} pero actualizador.VERSION es $v"
+            exit 1
+          }
+
       - name: Verificar que el módulo importa
         run: python -c "import scanner_app; print('import OK')"
 
@@ -41,6 +53,11 @@ jobs:
           $p = Start-Process -FilePath .\dist\LaBestia.exe -ArgumentList '--selftest' -Wait -PassThru
           if (Test-Path .\dist\selftest.log) { Get-Content .\dist\selftest.log }
           if ($p.ExitCode -ne 0) { Write-Error "El ejecutable no pasa el selftest"; exit 1 }
+
+      # Y lo mismo con la actualización: con el binario real, un instalado
+      # tiene que reemplazarse por uno más nuevo y volver a abrir.
+      - name: Verificar que el ejecutable se actualiza solo
+        run: python ci/probar_actualizacion.py dist\LaBestia.exe --oculto
 
       - name: Build (carpeta, plan B para antivirus restrictivo)
         run: pyinstaller --noconfirm LaBestia-carpeta.spec
@@ -75,5 +92,6 @@ jobs:
           gh release create ${{ github.ref_name }}
           dist/LaBestia.exe
           dist/LaBestia-carpeta.zip
+          instalar.cmd
           --title "La bestia ${{ github.ref_name }}"
           --generate-notes

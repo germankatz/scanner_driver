@@ -1,0 +1,2 @@
+# cmd.exe no encuentra las etiquetas (goto) en un archivo con fin de línea LF.
+*.cmd text eol=crlf

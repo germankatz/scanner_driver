@@ -5,7 +5,20 @@
 # extracción a %TEMP%), usar LaBestia-carpeta.spec, que no extrae
 # nada porque deja las DLLs sueltas en una carpeta.
 
+import os
+import sys
+
 from PyInstaller.utils.hooks import collect_all
+
+# El recurso de versión del .exe sale de actualizador.VERSION. De ahí lee cada
+# PC qué versión hay publicada en la carpeta de actualizaciones.
+sys.path.insert(0, SPECPATH)
+import actualizador
+
+os.makedirs(os.path.join(SPECPATH, 'build'), exist_ok=True)
+_version_info = os.path.join(SPECPATH, 'build', 'version_info.txt')
+with open(_version_info, 'w', encoding='utf-8') as f:
+    f.write(actualizador.texto_version_info())
 
 # Recolección explícita en vez de confiar sólo en los hooks: numpy y OpenCV
 # traen DLLs propias (OpenBLAS, runtime de VC) que si faltan se manifiestan
@@ -36,6 +49,7 @@ exe = EXE(
     a.datas,
     [],
     name='LaBestia',
+    version=_version_info,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

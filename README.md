@@ -29,6 +29,41 @@ ejecutable `AntigravityScanner.exe`. Es el mismo programa: al actualizar
 conserva la carpeta de destino, el prefijo y la calidad que ya estaban
 configurados.
 
+## Instalación y actualizaciones
+
+El ejecutable suelto funciona desde cualquier carpeta. Para que además pueda
+**actualizarse solo** tiene que estar donde los usuarios puedan escribir, y en
+el Escritorio público no pueden. Por eso, en una PC que usan varias personas:
+
+1. Copiá `LaBestia.exe` e `instalar.cmd` (los dos vienen en el release) a una
+   misma carpeta. La de actualizaciones sirve.
+2. En cada PC, desde una cuenta que pueda escribir en el Escritorio público,
+   ejecutá `instalar.cmd`. Deja el programa en `C:\LaBestia`, crea el acceso
+   directo **La bestia** en el escritorio de todos los usuarios y borra el
+   `LaBestia.exe` o `AntigravityScanner.exe` suelto que hubiera ahí.
+
+Se hace una sola vez por PC. Si hay que usar «Ejecutar como administrador»,
+copiá antes los dos archivos a una carpeta de la PC: con permisos elevados
+Windows no ve las unidades de red.
+
+### Actualizar
+
+Una versión nueva se publica copiando el `LaBestia.exe` del release a la
+carpeta de actualizaciones, `H:\see\imagenes_fallecidos\LaBestia`, pisando el
+anterior. Las PCs no necesitan internet: alcanza con que lleguen a esa
+carpeta. La versión se lee del propio `.exe` (la que muestra Windows en
+Propiedades > Detalles), así que no hay que renombrarlo ni copiar nada más.
+
+Al abrir, el programa mira esa carpeta. Si hay una versión más nueva aparece
+arriba el botón **Actualizar a x.y.z**, y con **Actualizar ahora** el programa
+se cierra, se reemplaza y vuelve a abrir solo, para todos los usuarios de esa
+PC. El botón de información, arriba a la derecha, muestra la versión instalada
+y tiene **Buscar actualizaciones** para no esperar al próximo arranque.
+
+Cualquier usuario de la PC puede modificar `C:\LaBestia`: es lo que permite
+actualizar sin una cuenta con permisos. En la carpeta de actualizaciones, en
+cambio, conviene que solo pueda escribir quien publica las versiones.
+
 ## Uso
 
 1. Elegí el escáner en el desplegable de arriba, o dejá **Auto-Detectar**.
@@ -82,6 +117,9 @@ Si al arrancar el destino no está disponible —una unidad de red caída, por
 ejemplo— la app avisa y guarda en una carpeta local temporal, **sin pisar la
 configuración**. Cuando la unidad vuelve, sigue escribiendo donde corresponde.
 
+Si en alguna PC la carpeta de actualizaciones está en otra ruta, se indica en
+ese mismo archivo con `"update_dir"`. No se ofrece en la ventana.
+
 ## Qué dice el log
 
 El registro reporta cada paso y arranca escondido; **Registro** (abajo a la
@@ -99,6 +137,7 @@ la pena abrirlo en la primera corrida de cada jornada:
 | `Captura directa no disponible (...). Cayendo al diálogo nativo.` | El driver rechazó el control directo. Funciona igual, por el camino viejo. |
 | `AVISO: no se detectó el documento con ninguna estrategia...` | Se guardó la cama completa. El documento queda más chico dentro del archivo. |
 | `AVISO: el documento toca el borde derecho de la cama...` | El documento llega al límite de lo que ve el escáner. Si ese borde salió cortado, correlo unos milímetros hacia adentro y volvé a escanear. |
+| `Hay una versión nueva del programa: 1.3.1 (esta es la 1.3.0).` | Hay una actualización publicada. Arriba aparece el botón para instalarla. |
 | `Todavía no se pudo borrar doc_12_raw.bmp (Acceso denegado)...` | El escaneo salió bien. Windows no dejó borrar el crudo porque otro programa lo tenía tomado; se borra solo al empezar el escaneo siguiente o al cerrar. |
 | `AVISO: no se pudo borrar doc_12_raw.bmp (...). Hay que borrarlo a mano.` | Tampoco se pudo en el segundo intento. El escaneo está bien; sobra ese `_raw.bmp` en la carpeta. |
 
@@ -182,11 +221,24 @@ pyinstaller LaBestia.spec
 ```
 
 Cada push a `main` dispara un build en CI que deja el `.exe` como artifact.
-Pushear un tag `v*` además publica un release:
+Además de compilar, CI ejecuta el binario: `--selftest`, y
+`ci/probar_actualizacion.py`, que arma una instalación de prueba y verifica
+que se reemplace por una versión más nueva y vuelva a abrir.
+
+La versión del programa está en `actualizador.VERSION` y el build la graba en
+el `.exe`. Para publicar una versión: subirla ahí, pushear, y pushear el tag
+`v` + esa versión (CI rechaza un tag que no coincida), que publica el release:
 
 ```bash
-git tag -a v1.0.1 -m "descripción del cambio" && git push origin v1.0.1
+git tag -a v1.3.1 -m "descripción del cambio" && git push origin v1.3.1
 ```
+
+Por último, copiar el `LaBestia.exe` del release a la carpeta de
+actualizaciones.
+
+`LaBestia.exe --actualizar-desde <carpeta>` hace lo mismo que el botón
+**Actualizar ahora** sin abrir la ventana. Lo usa la prueba de CI, y sirve para
+actualizar una PC desde un script.
 
 ### Utilidades de diagnóstico
 

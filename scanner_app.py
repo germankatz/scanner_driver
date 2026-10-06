@@ -5,6 +5,9 @@ import time
 import glob
 import json
 import html
+import threading
+
+import actualizador
 
 
 def run_selftest():
@@ -19,6 +22,7 @@ def run_selftest():
         LaBestia.exe --selftest
     """
     lineas, ok = [], True
+    lineas.append(f"version  : {actualizador.VERSION}")
     lineas.append(f"python   : {sys.version.split()[0]}")
     lineas.append(f"ejecutable: {sys.executable}")
     lineas.append(f"congelado : {getattr(sys, 'frozen', False)}")
@@ -80,6 +84,18 @@ def run_selftest():
             ok = False
             lineas.append(f"FALLA fast_io: {type(e).__name__}: {e}")
 
+    # Las actualizaciones comparan versiones leyendo el recurso de versión del
+    # ejecutable publicado: si el build no lo graba, ninguna PC se entera de
+    # que hay una versión nueva.
+    if getattr(sys, "frozen", False) and sys.platform == "win32":
+        grabada = actualizador.version_de_exe(sys.executable)
+        if grabada == actualizador._tupla(actualizador.VERSION):
+            lineas.append("OK   recurso de versión del ejecutable")
+        else:
+            ok = False
+            lineas.append(f"FALLA recurso de versión: el ejecutable dice {grabada}, "
+                          f"el programa {actualizador.VERSION}")
+
     lineas.append("RESULTADO: OK" if ok else "RESULTADO: FALLA")
     texto = "\n".join(lineas)
     print(texto)
@@ -98,15 +114,21 @@ if __name__ == "__main__" and "--selftest" in sys.argv:
     # este es el modo que tiene que seguir funcionando para poder reportarlo.
     sys.exit(run_selftest())
 
+if __name__ == "__main__" and "--actualizar-desde" in sys.argv:
+    # Actualizar sin abrir la ventana (ver actualizador.actualizar_desde).
+    sys.exit(actualizador.actualizar_desde(
+        sys.argv[sys.argv.index("--actualizar-desde") + 1]))
+
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QLineEdit, QPushButton, QTextEdit, QFrame, QStyledItemDelegate,
-    QDialog, QFileDialog, QGraphicsDropShadowEffect, QSpacerItem, QSizePolicy
+    QDialog, QFileDialog, QGraphicsDropShadowEffect, QSpacerItem, QSizePolicy,
+    QMessageBox
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, pyqtSlot, QEvent, QSize, QRectF, QLineF,
-    QByteArray, QVariantAnimation
+    QByteArray, QVariantAnimation, QTimer
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPixmap, QImage, QKeySequence, QShortcut, QPainter, QBrush, QIcon,
@@ -1078,6 +1100,59 @@ class SettingsDialog(QDialog):
         if d:
             self.txt_dir.setText(d)
 
+
+class AcercaDialog(QDialog):
+    """
+    La versión del programa y las actualizaciones. Solo muestra: el estado y
+    las acciones son de la ventana principal, que lo refresca cuando cambian.
+    """
+
+    def __init__(self, ventana):
+        super().__init__(ventana)
+        self.ventana = ventana
+        self.setWindowTitle("Acerca de La bestia")
+        self.setFixedSize(430, 220)
+        self.setStyleSheet(ventana.styleSheet())
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(4)
+        titulo = QLabel("La bestia")
+        titulo.setObjectName("acercaTitulo")
+        version = QLabel(f"Versión {actualizador.VERSION}")
+        version.setObjectName("mutedLabel")
+        layout.addWidget(titulo)
+        layout.addWidget(version)
+        layout.addSpacing(14)
+
+        self.lbl_estado = QLabel()
+        self.lbl_estado.setWordWrap(True)
+        self.lbl_estado.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.lbl_estado, stretch=1)
+
+        self.btn_buscar = QPushButton(" Buscar actualizaciones")
+        self.btn_buscar.setIcon(icon("refrescar", "#CCCCCC"))
+        self.btn_buscar.setIconSize(QSize(16, 16))
+        self.btn_buscar.setObjectName("secondaryButton")
+        self.btn_buscar.clicked.connect(ventana.check_updates)
+        self.btn_actualizar = QPushButton(" Actualizar ahora")
+        self.btn_actualizar.setIcon(icon("descargar", "#FFFFFF"))
+        self.btn_actualizar.setIconSize(QSize(16, 16))
+        self.btn_actualizar.setObjectName("updateButton")
+        self.btn_actualizar.clicked.connect(ventana.start_update)
+        botones = QHBoxLayout()
+        botones.addWidget(self.btn_buscar)
+        botones.addStretch()
+        botones.addWidget(self.btn_actualizar)
+        layout.addLayout(botones)
+        self.refrescar()
+
+    def refrescar(self):
+        texto, ocupado, se_puede = self.ventana.estado_actualizacion()
+        self.lbl_estado.setText(texto)
+        self.btn_buscar.setEnabled(not ocupado)
+        self.btn_actualizar.setVisible(se_puede)
+
 # Iconos de linea (trazos de Tabler Icons, licencia MIT), en una grilla de
 # 24x24. Reemplazan a los emoji, que cada version de Windows dibuja distinto y
 # a color. Se guardan como texto y se pintan con el color que haga falta.
@@ -1099,6 +1174,12 @@ ICONOS = {
     "alerta": '<path d="M12 9v4"/>'
               '<path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z"/>'
               '<path d="M12 16h.01"/>',
+    "info": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"/>'
+            '<path d="M12 9h.01"/><path d="M11 12h1v4h1"/>',
+    "refrescar": '<path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"/>'
+                 '<path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/>',
+    "descargar": '<path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"/>'
+                 '<path d="M7 11l5 5l5 -5"/><path d="M12 4l0 12"/>',
 }
 
 
@@ -1382,6 +1463,11 @@ class ElidedLabel(QLabel):
 
 
 class ScannerApp(QMainWindow):
+    # Lo que se hace en segundo plano para las actualizaciones avisa por acá:
+    # (resultado, error), uno de los dos en None.
+    _act_buscada = pyqtSignal(object, object)
+    _act_copiada = pyqtSignal(object, object)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("La bestia")
@@ -1390,6 +1476,17 @@ class ScannerApp(QMainWindow):
         self.output_dir = cfg.get("output_dir") or DEFAULT_OUTPUT_DIR
         self.file_prefix = cfg.get("file_prefix") or DEFAULT_PREFIX
         self.config_cargada = bool(cfg.get("output_dir"))
+
+        # Actualizaciones. "update_dir" no se ofrece en la ventana: es para la
+        # PC que tenga la carpeta compartida en otra letra de unidad.
+        self.update_dir = cfg.get("update_dir") or actualizador.CARPETA_ACTUALIZACIONES
+        self.act = None               # última búsqueda: (estado, versión, ruta o detalle)
+        self._act_ocupado = None      # "buscando", "copiando" o None
+        self._act_error = None        # por qué falló el último intento de actualizar
+        self._act_impedimento = None  # por qué este ejecutable no se puede actualizar solo
+        self.dlg_acerca = None
+        self._act_buscada.connect(self.on_update_checked)
+        self._act_copiada.connect(self.on_update_copied)
 
         # Si el destino no está disponible (unidad de red caída, por ejemplo)
         # se usa una carpeta local, pero NO se persiste: si se guardara, una
@@ -1461,13 +1558,32 @@ class ScannerApp(QMainWindow):
         self.btn_local.setVisible(False)
         self.btn_debug.toggled.connect(self.btn_local.setVisible)
 
+        # Versión del programa y actualizaciones. El botón de actualizar solo
+        # aparece cuando hay una versión nueva publicada.
+        self.btn_info = QPushButton()
+        self.btn_info.setIcon(icon("info", "#CCCCCC", 18))
+        self.btn_info.setIconSize(QSize(18, 18))
+        self.btn_info.setObjectName("infoButton")
+        self.btn_info.setToolTip(f"La bestia {actualizador.VERSION}: versión y actualizaciones")
+        self.btn_info.clicked.connect(self.open_about)
+        self.btn_update = QPushButton()
+        self.btn_update.setIcon(icon("descargar", "#FFFFFF"))
+        self.btn_update.setIconSize(QSize(16, 16))
+        self.btn_update.setObjectName("updateButton")
+        self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_update.setToolTip("Hay una versión nueva del programa")
+        self.btn_update.clicked.connect(self.open_about)
+        self.btn_update.setVisible(False)
+
         lbl_escaner = QLabel("Escáner")
         lbl_escaner.setObjectName("mutedLabel")
         top_layout.addWidget(lbl_escaner)
         top_layout.addWidget(self.cb_scanner)
         top_layout.addStretch()
+        top_layout.addWidget(self.btn_update)
         top_layout.addWidget(self.btn_local)
         top_layout.addWidget(self.btn_debug)
+        top_layout.addWidget(self.btn_info)
         main_layout.addLayout(top_layout)
 
         # Destino: la carpeta a la vista y, al lado, el acceso para cambiarla.
@@ -1676,6 +1792,129 @@ class ScannerApp(QMainWindow):
                 self.log_to_console("Configuración guardada: se va a recordar al reiniciar.")
             else:
                 self.log_to_console(f"AVISO: no se pudo guardar la configuración ({detalle}).")
+
+    # --- Versión y actualizaciones (el mecanismo está en actualizador.py) ---
+
+    def _en_segundo_plano(self, fn, senal):
+        """
+        Corre fn fuera del hilo de la ventana y entrega (resultado, error) por
+        la señal. Es un hilo demonio y no un QThread: si la unidad de red no
+        contesta puede quedar colgado un rato largo, y eso no tiene que
+        impedir que el programa cierre.
+        """
+        def trabajo():
+            try:
+                salida = (fn(), None)
+            except Exception as e:
+                salida = (None, e)
+            try:
+                senal.emit(*salida)
+            except RuntimeError:
+                pass    # la ventana ya no existe
+
+        threading.Thread(target=trabajo, daemon=True).start()
+
+    def _refrescar_acerca(self):
+        if self.dlg_acerca is not None:
+            self.dlg_acerca.refrescar()
+
+    def open_about(self):
+        self.dlg_acerca = AcercaDialog(self)
+        self.check_updates()
+        self.dlg_acerca.exec()
+        self.dlg_acerca = None
+
+    def estado_actualizacion(self):
+        """(texto, hay algo en curso, se puede actualizar ya) para el diálogo de versión."""
+        if self._act_ocupado == "copiando":
+            return (f"Copiando la versión {self.act[1]}… El programa se cierra y "
+                    f"vuelve a abrir solo.", True, False)
+        if self._act_ocupado == "buscando":
+            return "Buscando actualizaciones…", True, False
+        if self.act is None:
+            return "", False, False
+        estado, version, detalle = self.act
+        if estado == "nueva":
+            if self._act_error:
+                return f"No se pudo actualizar a la {version}: {self._act_error}", False, True
+            if self._act_impedimento:
+                return f"Hay una versión nueva: {version}. {self._act_impedimento}", False, False
+            return f"Hay una versión nueva: {version}.", False, True
+        return {
+            "al_dia": "Tenés la última versión.",
+            "sin_publicar": f"No hay ninguna versión publicada en {self.update_dir}.",
+            "sin_carpeta": f"No se pudo abrir la carpeta de actualizaciones ({self.update_dir}).",
+            "error": f"No se pudo buscar: {detalle}",
+        }[estado], False, False
+
+    def check_updates(self):
+        """Mira si hay una versión nueva publicada, sin trabar la ventana."""
+        if self._act_ocupado:
+            return
+        self._act_ocupado = "buscando"
+        self._act_error = None
+        self._refrescar_acerca()
+        carpeta = self.update_dir
+
+        def buscar():
+            actualizador.limpiar_restos()
+            return actualizador.buscar(carpeta), actualizador.impedimento()
+
+        self._en_segundo_plano(buscar, self._act_buscada)
+
+    @pyqtSlot(object, object)
+    def on_update_checked(self, resultado, error):
+        self._act_ocupado = None
+        anterior = self.act
+        if error is None:
+            self.act, self._act_impedimento = resultado
+        else:
+            self.act = ("error", None, str(error))
+        nueva = self.act[0] == "nueva"
+        if nueva:
+            self.btn_update.setText(f" Actualizar a {self.act[1]}")
+            if self.act != anterior:
+                self.log_to_console(
+                    f"Hay una versión nueva del programa: {self.act[1]} "
+                    f"(esta es la {actualizador.VERSION})."
+                )
+        self.btn_update.setVisible(nueva)
+        self._refrescar_acerca()
+
+    def start_update(self):
+        if self._act_ocupado or not self.act or self.act[0] != "nueva":
+            return
+        if not self.btn_scan.isEnabled():
+            self._act_error = "hay un escaneo en curso. Esperá a que termine."
+            self._refrescar_acerca()
+            return
+        self._act_ocupado = "copiando"
+        self._act_error = None
+        # Que no arranque un escaneo: el programa está por cerrarse.
+        self.btn_scan.setEnabled(False)
+        self.btn_manual.setEnabled(False)
+        self._refrescar_acerca()
+        origen = self.act[2]
+        self._en_segundo_plano(lambda: actualizador.preparar(origen), self._act_copiada)
+
+    @pyqtSlot(object, object)
+    def on_update_copied(self, nuevo, error):
+        if error is None:
+            try:
+                actualizador.lanzar_instalacion(nuevo)
+            except OSError as e:
+                error = e
+        if error is not None:
+            self._act_ocupado = None
+            self._act_error = str(error)
+            self.btn_scan.setEnabled(True)
+            self.btn_manual.setEnabled(True)
+            self.log_to_console(f"Error al actualizar: {error}")
+            self._refrescar_acerca()
+            return
+        # El ejecutable nuevo ya arrancó y espera a que este cierre para
+        # reemplazarlo.
+        QApplication.quit()
 
     def get_next_filename(self):
         # Auto-increment rellenando huecos: un solo listdir en vez de un
@@ -2269,15 +2508,31 @@ class ScannerApp(QMainWindow):
         #secondaryButton:hover {
             background-color: #404040;
         }
-        #debugButton {
+        #debugButton, #infoButton {
             background-color: #333333;
             border: 1px solid #454545;
             border-radius: 6px;
             font-size: 16px;
             padding: 5px 12px;
         }
-        #debugButton:hover {
+        #debugButton:hover, #infoButton:hover {
             background-color: #404040;
+        }
+        #updateButton {
+            background-color: #007ACC;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 6px 14px;
+            font-weight: bold;
+        }
+        #updateButton:hover {
+            background-color: #0098FF;
+        }
+        #acercaTitulo {
+            color: #FFFFFF;
+            font-size: 18px;
+            font-weight: bold;
         }
         #debugButton:checked {
             background-color: #2E7D32; /* Verde oscuro */
@@ -2295,12 +2550,64 @@ class ScannerApp(QMainWindow):
         self.setStyleSheet(qss)
 
 
+def run_instalar(app, destino):
+    """
+    Lo que hace el ejecutable nuevo durante una actualización (ver
+    actualizador.py): un cartel mientras reemplaza al instalado, y después lo
+    abre. Si no pudo reemplazarlo, avisa y abre el que estaba.
+    """
+    cartel = QLabel("Actualizando La bestia…\nEl programa se abre solo en unos segundos.")
+    cartel.setWindowFlags(Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint)
+    cartel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    cartel.setStyleSheet(
+        "background-color: #1E1E1E; color: #D4D4D4; font-size: 14px; "
+        "padding: 28px 44px; border: 1px solid #454545;"
+    )
+    cartel.show()
+
+    resultado = []
+
+    def trabajo():
+        try:
+            resultado.append(actualizador.instalar(destino))
+        except Exception as e:
+            resultado.append(e)
+
+    def revisar():
+        if not resultado:
+            return
+        reloj.stop()
+        error = resultado[0]
+        if error is not None:
+            cartel.hide()
+            QMessageBox.warning(
+                None, "La bestia",
+                "No se pudo actualizar: el programa sigue abierto, quizás en otra "
+                "sesión de esta PC.\n\nSe abre la versión que ya estaba instalada."
+            )
+        actualizador.abrir(destino)
+        # El programa tarda unos segundos en aparecer: el cartel queda hasta
+        # entonces, para que nadie crea que no pasó nada y lo abra de nuevo.
+        QTimer.singleShot(0 if error is not None else 4000, app.quit)
+
+    reloj = QTimer()
+    reloj.setInterval(200)
+    reloj.timeout.connect(revisar)
+    reloj.start()
+    threading.Thread(target=trabajo, daemon=True).start()
+    app.exec()
+    return 0 if resultado and resultado[0] is None else 1
+
+
 if __name__ == '__main__':
     if hasattr(Qt.ApplicationAttribute, 'AA_EnableHighDpiScaling'):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
     app = QApplication(sys.argv)
     app.setFont(QFont("Inter", 10))
+    if "--instalar" in sys.argv:
+        sys.exit(run_instalar(app, sys.argv[sys.argv.index("--instalar") + 1]))
     window = ScannerApp()
     window.show()
+    window.check_updates()
     app.aboutToQuit.connect(lambda: _limpiar_crudos_pendientes())
     sys.exit(app.exec())
