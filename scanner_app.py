@@ -227,6 +227,139 @@ def _frame_margins(img):
             margen(racha(columnas), tope_h), margen(racha(columnas[::-1]), tope_h))
 
 
+def _refine_rect(img, rect, alcance):
+    """
+    Ajusta el rectangulo del documento contra el crudo a resolucion completa.
+
+    El contorno sale de una copia reducida a 800 px de alto, desenfocada y
+    binarizada: cada pixel de ahi son unos 5 del crudo, asi que llega
+    escalonado, con las esquinas redondeadas y corrido varios pixeles. El
+    rectangulo que se le calcula encima hereda todo eso: en un crudo real se
+    comia 5 px de papel arriba y abajo, hasta 11 a la derecha, y a la izquierda
+    dejaba una cuna de cama.
+
+    Aca ese rectangulo es solo el punto de partida. Sobre cada lado se toman
+    perfiles perpendiculares en el crudo, en cada uno se ubica el paso de cama
+    a papel con precision de subpixel y se ajusta una recta robusta: muescas,
+    sellos y puntas rotas quedan afuera como atipicos. El angulo sale de esas
+    rectas, pesando mas las que se midieron mejor (lado largo y prolijo).
+
+    El resultado sigue siendo un rectangulo, el minimo que encierra los cuatro
+    lados medidos. Una ficha cortada fuera de escuadra deja ver un poco de
+    cama en vez de salir deformada o con un borde comido.
+
+    rect: esquinas (tl, tr, br, bl) en coordenadas del crudo.
+    alcance: cuantos px buscar a cada lado del borde aproximado.
+
+    Devuelve (rect, lados_medidos). Un lado sin transicion clara (documento
+    contra el marco, tapa del mismo tono que el papel) se deja como estaba, y
+    con lados_medidos en 0 el rectangulo vuelve sin cambios.
+    """
+    import cv2
+    import numpy as np
+
+    gray = cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (5, 5), 0)
+    rect = np.asarray(rect, dtype=np.float64)
+    sin_cambios = (rect.astype(np.float32), 0)
+    centro = rect.mean(axis=0)
+    offs = np.arange(-alcance, alcance + 1, dtype=np.float64)
+    tol = 2.0      # px que un punto puede apartarse de la recta de su lado
+    colchon = 2.0  # px de cama que se dejan alrededor, para no morder el canto
+
+    def ajustar(t, o):
+        # Arranque con medianas (aguanta atipicos) y despues minimos cuadrados
+        # solo sobre los puntos que quedaron cerca.
+        m = len(t) // 2
+        b = float(np.median((o[m:2 * m] - o[:m]) / (t[m:2 * m] - t[:m])))
+        a = float(np.median(o - b * t))
+        ok = np.abs(o - (a + b * t)) <= tol
+        for _ in range(3):
+            if ok.sum() < 2:
+                break
+            b, a = np.polyfit(t[ok], o[ok], 1)
+            ok = np.abs(o - (a + b * t)) <= tol
+        return a, b, ok
+
+    rectas = []  # por lado: (punto, direccion)
+    giros = []   # por lado medido: (pendiente respecto del lado aproximado, peso)
+    ejes = None
+    for i in range(4):
+        p0, p1 = rect[i], rect[(i + 1) % 4]
+        largo = float(np.linalg.norm(p1 - p0))
+        if largo < 1:
+            return sin_cambios
+        d = (p1 - p0) / largo
+        n = np.array([-d[1], d[0]])
+        if np.dot(centro - p0, n) < 0:
+            n = -n  # normal hacia adentro del documento
+        if ejes is None:
+            ejes = (d, n)
+        recta = (p0, d)
+
+        # Las puntas no se miran: ahi estan las esquinas redondeadas o rotas.
+        margen = max(0.05 * largo, 2 * alcance)
+        ts = np.arange(margen, largo - margen, 6.0)
+        if len(ts) >= 20:
+            base = p0[None, :] + ts[:, None] * d[None, :]
+            mx = (base[:, 0:1] + offs[None, :] * n[0]).astype(np.float32)
+            my = (base[:, 1:2] + offs[None, :] * n[1]).astype(np.float32)
+            # Una fila por perfil, de afuera (columna 0) hacia adentro.
+            tira = cv2.remap(gray, mx, my, cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REPLICATE).astype(np.float64)
+
+            q = max(alcance // 2, 1)
+            afuera = float(np.median(tira[:, :q]))
+            adentro = float(np.median(tira[:, -q:]))
+            if abs(adentro - afuera) >= 25:
+                # Primer cruce del nivel medio viniendo de afuera: el canto
+                # del papel y no una linea impresa mas adentro.
+                medio = (afuera + adentro) / 2.0
+                sobre = (tira > medio) if adentro > afuera else (tira < medio)
+                idx = sobre.argmax(axis=1)
+                r = np.nonzero(sobre.any(axis=1) & (idx > 0))[0]
+                if len(r) >= 20:
+                    v0, v1 = tira[r, idx[r] - 1], tira[r, idx[r]]
+                    pos = offs[idx[r] - 1] + (medio - v0) / (v1 - v0)
+                    a, b, ok = ajustar(ts[r], pos)
+                    if ok.sum() >= 0.6 * len(ts):
+                        t_ok = ts[r][ok]
+                        resid = pos[ok] - (a + b * t_ok)
+                        # Inversa de la varianza de la pendiente ajustada.
+                        peso = ((t_ok - t_ok.mean()) ** 2).sum() / max(resid.var(), 0.05)
+                        giros.append((b, peso))
+                        dd = d + n * b
+                        recta = (p0 + n * a, dd / np.linalg.norm(dd))
+        rectas.append(recta)
+
+    if not giros:
+        return sin_cambios
+
+    # Esquinas: cruce de cada lado con el anterior.
+    esquinas = np.zeros((4, 2))
+    for i in range(4):
+        (a1, d1), (a2, d2) = rectas[i - 1], rectas[i]
+        try:
+            k = np.linalg.solve(np.array([d1, -d2]).T, a2 - a1)
+        except np.linalg.LinAlgError:
+            return sin_cambios
+        esquinas[i] = a1 + k[0] * d1
+    if np.linalg.norm(esquinas - rect, axis=1).max() > 2 * alcance:
+        return sin_cambios
+
+    pendientes, pesos = zip(*giros)
+    giro = np.arctan(np.average(pendientes, weights=pesos))
+    d, n = ejes
+    u = d * np.cos(giro) + n * np.sin(giro)
+    v = n * np.cos(giro) - d * np.sin(giro)
+    pu = (esquinas - centro) @ u
+    pv = (esquinas - centro) @ v
+    u0, u1 = pu.min() - colchon, pu.max() + colchon
+    v0, v1 = pv.min() - colchon, pv.max() + colchon
+    nuevo = centro + np.array([u0 * u + v0 * v, u1 * u + v0 * v,
+                               u1 * u + v1 * v, u0 * u + v1 * v])
+    return nuevo.astype(np.float32), len(giros)
+
+
 def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False):
     """
     Procesa la imagen escaneada mediante una transformacion de perspectiva.
@@ -269,8 +402,13 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
         c, strategy = _detect_document(small_img, debug_dir)
 
         if c is not None:
-            # Ajustar contorno a la escala original
-            c = (c.astype("float") * ratio).astype("int")
+            # Ajustar contorno a la escala original. Cada eje con su factor (el
+            # ancho reducido se trunca a entero, asi que no es exactamente
+            # ratio) y por el centro del pixel: escalando el indice a secas,
+            # los bordes derecho e inferior quedaban unos 5 px hacia adentro.
+            escala = (orig.shape[1] / small_img.shape[1],
+                      orig.shape[0] / small_img.shape[0])
+            c = np.round((c + 0.5) * escala - 0.5).astype(np.int32)
 
             # Si el documento llega al borde de lo escaneado, lo que siga por
             # debajo del marco se perdio y no hay procesamiento que lo
@@ -289,32 +427,41 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
                     f"Si ahí se cortó, correlo unos milímetros hacia adentro."
                 )
 
-            if debug_mode:
-                debug_img = orig.copy()
-                cv2.drawContours(debug_img, [c], -1, (0, 255, 0), 10)
-                cv2.imwrite(os.path.join(debug_dir, "debug_4_contour.jpg"), debug_img)
-
+            # El contorno da un rectangulo aproximado; los lados se miden de
+            # nuevo sobre el crudo (ver _refine_rect).
             box = cv2.boxPoints(cv2.minAreaRect(c))
-            pts = np.array(box, dtype=np.int32).reshape(4, 2)
-            rect = order_points(pts)
+            rect = order_points(np.array(box, dtype=np.float32).reshape(4, 2))
+            rect, lados_medidos = _refine_rect(orig, rect, int(round(6 * ratio)))
             (tl, tr, br, bl) = rect
 
-            widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
-            widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
-            maxWidth = max(int(widthA), int(widthB))
+            if debug_mode:
+                # Rojo fino: el contorno aproximado. Verde: el recorte final.
+                debug_img = orig.copy()
+                cv2.drawContours(debug_img, [c], -1, (0, 0, 255), 2)
+                cv2.polylines(debug_img, [np.round(rect).astype(np.int32)], True,
+                              (0, 255, 0), 4)
+                cv2.imwrite(os.path.join(debug_dir, "debug_4_contour.jpg"), debug_img)
+                if log_signal:
+                    log_signal.emit(f"Lados medidos sobre el crudo: {lados_medidos} de 4.")
 
-            heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
-            heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
-            maxHeight = max(int(heightA), int(heightB))
+            ancho = float(np.linalg.norm(tr - tl))
+            alto = float(np.linalg.norm(bl - tl))
+            maxWidth = int(round(ancho)) + 1
+            maxHeight = int(round(alto)) + 1
 
+            # Escala 1:1 exacta: cada esquina va a su distancia real, sin
+            # estirar para que coincida con el ultimo pixel.
             dst = np.array([
                 [0, 0],
-                [maxWidth - 1, 0],
-                [maxWidth - 1, maxHeight - 1],
-                [0, maxHeight - 1]], dtype="float32")
+                [ancho, 0],
+                [ancho, alto],
+                [0, alto]], dtype="float32")
 
+            # Cubica: el recorte ya no cae en pixeles enteros y la bilineal
+            # ablanda el trazo fino cuando interpola a medio pixel.
             M = cv2.getPerspectiveTransform(rect, dst)
-            warped = cv2.warpPerspective(orig, M, (maxWidth, maxHeight))
+            warped = cv2.warpPerspective(orig, M, (maxWidth, maxHeight),
+                                         flags=cv2.INTER_CUBIC)
 
             if warped.size > 0:
                 cv2.imwrite(output_path_png, warped)

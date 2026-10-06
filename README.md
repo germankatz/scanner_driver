@@ -78,7 +78,10 @@ no lo borres.
 
 Para analizarlo sin tener que reproducir el error: activá el botón **🐛** y abrí
 ese `_raw.bmp` con **📂 Procesar archivo**. Escribe un `debug_mask_*.jpg` por
-cada estrategia que se intentó, así se ve en cuál se rompió la detección.
+cada estrategia que se intentó, así se ve en cuál se rompió la detección, y un
+`debug_4_contour.jpg` con el contorno aproximado en rojo y el recorte final en
+verde. El log agrega cuántos de los cuatro lados se pudieron medir sobre el
+crudo.
 
 **Si la resolución baja**, mirá si aparece el aviso en el log. Suele indicar que
 el driver no aceptó los 300 dpi y hubo que caer al diálogo nativo.
@@ -110,9 +113,14 @@ plausible:
    brillo contra la tapa sea casi nulo
 4. Desvío respecto del fondo de la cama, estimado con la mediana del marco
 
-**Recorte.** El contorno se escala de vuelta a la resolución original y se
-aplica una transformación de perspectiva, así que un documento apoyado torcido
-sale derecho.
+**Recorte.** El contorno de la copia reducida solo da un rectángulo aproximado:
+cada píxel de ahí son unos 5 del crudo, y usarlo directo se comía varios
+píxeles de papel o dejaba una cuña de cama. Los cuatro lados se vuelven a medir
+sobre el crudo a resolución completa, ajustando una recta al canto del papel en
+cada uno. Con eso se endereza el documento y se recorta dejando 2 px de cama
+alrededor. Una ficha cortada fuera de escuadra deja ver un poco de cama de un
+lado en vez de salir deformada. Si un lado no se puede medir (documento contra
+el marco, tapa del mismo tono que el papel) se usa el del contorno aproximado.
 
 ## Desarrollo
 
