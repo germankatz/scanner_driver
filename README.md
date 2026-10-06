@@ -10,6 +10,10 @@ pérdida, numerando los archivos solo.
 Pensada para tandas largas: se escanea con Enter y no hay que tocar el diálogo
 del escáner en ningún momento.
 
+<img src="docs/captura.png" alt="La ventana de La bestia después de un escaneo: el documento recortado y enderezado, el botón de escaneo y la barra de calidad" width="800">
+
+La ficha de la captura es inventada.
+
 ## Descarga
 
 El ejecutable no necesita Python ni instalación:
@@ -17,7 +21,8 @@ El ejecutable no necesita Python ni instalación:
 **[Descargar la última versión](https://github.com/germankatz/scanner_driver/releases/latest)**
 
 Requiere Windows y un escáner con driver WIA (los de Windows desde XP en
-adelante lo son; TWAIN no está soportado).
+adelante lo son; TWAIN no está soportado). Funciona muy bien con la Lexmark
+X646.
 
 Hasta la versión 1.1.1 el programa se llamaba Antigravity Scanner y el
 ejecutable `AntigravityScanner.exe`. Es el mismo programa: al actualizar

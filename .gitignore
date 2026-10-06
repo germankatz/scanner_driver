@@ -13,6 +13,9 @@ Scans/
 *.jpg
 *.jpeg
 doc_*_raw.*
+# La captura del README no es un escaneo: es la ventana mostrando una ficha
+# inventada. Es la única imagen que va al repositorio.
+!docs/captura.png
 
 # Volcados de propiedades del escáner (pueden traer nº de serie del equipo)
 properties.txt
