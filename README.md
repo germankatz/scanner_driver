@@ -122,6 +122,16 @@ alrededor. Una ficha cortada fuera de escuadra deja ver un poco de cama de un
 lado en vez de salir deformada. Si un lado no se puede medir (documento contra
 el marco, tapa del mismo tono que el papel) se usa el del contorno aproximado.
 
+**Lectura y guardado.** Leer el crudo y escribir el PNG eran tres cuartos del
+tiempo de procesamiento, así que `fast_io.py` los hace por su cuenta: lee el
+BMP del escáner directo a memoria y comprime el PNG por bandas en paralelo. El
+resultado es el mismo que con OpenCV (la misma imagen leída, un PNG que
+decodifica a los mismos píxeles) y cualquier caso fuera de lo común se lo deja
+a OpenCV. Con eso, y con no calcular lo que no se usa en los demás pasos, el
+procesamiento de un escaneo de cama oficio a 300 dpi pasó de unos 290 ms a
+unos 85 ms. `AntigravityScanner.exe --selftest` verifica que `fast_io` dé lo
+mismo que OpenCV dentro del ejecutable.
+
 ## Desarrollo
 
 ```bash

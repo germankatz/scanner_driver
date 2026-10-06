@@ -48,6 +48,36 @@ def run_selftest():
             ok = False
             lineas.append(f"FALLA operaciones numpy+cv2: {type(e).__name__}: {e}")
 
+    # fast_io lee el crudo y escribe el PNG por su cuenta (hilos + zlib): tiene
+    # que venir empaquetado y dar lo mismo que OpenCV con las versiones del
+    # ejecutable, que no son las de la maquina donde se desarrolla.
+    if ok:
+        try:
+            import tempfile
+            import numpy as np, cv2, fast_io
+            a = np.random.default_rng(0).integers(0, 256, (1400, 2000, 3), dtype=np.uint8)
+            a[200:600, 300:1500] = 230  # zona lisa: ejercita la otra estrategia de compresion
+            with tempfile.TemporaryDirectory() as d:
+                if not d.isascii():
+                    # OpenCV en Windows no abre rutas con acentos; no es una
+                    # falla del ejecutable.
+                    lineas.append("OMITIDO fast_io: la carpeta temporal tiene caracteres no ASCII")
+                else:
+                    bmp, png = os.path.join(d, "selftest.bmp"), os.path.join(d, "selftest.png")
+                    cv2.imwrite(bmp, a)
+                    leida = fast_io.read_image(bmp)
+                    fast_io.write_png(a, png)
+                    vuelta = cv2.imread(png)
+                    if (leida is None or not np.array_equal(leida, a)
+                            or fast_io.image_size(bmp) != (2000, 1400)):
+                        raise RuntimeError("la lectura del BMP no coincide con la imagen escrita")
+                    if vuelta is None or not np.array_equal(vuelta, a):
+                        raise RuntimeError("el PNG escrito no decodifica a la imagen original")
+                    lineas.append(f"OK   fast_io (BMP y PNG de ida y vuelta, {os.path.getsize(png)} bytes)")
+        except Exception as e:
+            ok = False
+            lineas.append(f"FALLA fast_io: {type(e).__name__}: {e}")
+
     lineas.append("RESULTADO: OK" if ok else "RESULTADO: FALLA")
     texto = "\n".join(lineas)
     print(texto)
@@ -109,31 +139,37 @@ def _detect_document(small_img, debug_dir=None):
     h, w = blurred.shape
     total_area = float(h * w)
 
-    strategies = []
+    # Cada mascara se arma recien cuando la cascada llega a esa estrategia.
+    # Casi siempre resuelve la primera, y Canny y el desvio del fondo costaban
+    # la mitad del tiempo de esta funcion sin que nadie los mirara.
 
     # A) Otsu, las dos polaridades (el papel puede quedar en cualquiera de las
     #    dos clases segun de que lado caiga el umbral).
-    _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    strategies.append(("otsu", otsu))
-    strategies.append(("otsu_inv", cv2.bitwise_not(otsu)))
+    def otsu():
+        return cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+
+    def otsu_inv():
+        return cv2.bitwise_not(otsu())
 
     # B) Bordes: el canto del papel deja una sombra aunque el contraste de
     #    brillo entre papel y tapa sea casi nulo. No depende del histograma
     #    global, asi que la suciedad no lo corre.
-    edges = cv2.Canny(blurred, 30, 90)
-    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
-    strategies.append(("canny", edges))
+    def canny():
+        edges = cv2.Canny(blurred, 30, 90)
+        return cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
 
     # C) Desvio respecto del fondo de la cama, estimado con la mediana del
     #    marco exterior (ahi nunca hay documento).
-    border = np.concatenate([
-        blurred[:10, :].ravel(), blurred[-10:, :].ravel(),
-        blurred[:, :10].ravel(), blurred[:, -10:].ravel(),
-    ])
-    bed = int(np.median(border))
-    diff = cv2.absdiff(blurred, np.full_like(blurred, bed))
-    _, dev = cv2.threshold(diff, 12, 255, cv2.THRESH_BINARY)
-    strategies.append(("fondo", dev))
+    def fondo():
+        border = np.concatenate([
+            blurred[:10, :].ravel(), blurred[-10:, :].ravel(),
+            blurred[:, :10].ravel(), blurred[:, -10:].ravel(),
+        ])
+        bed = int(np.median(border))
+        diff = cv2.absdiff(blurred, np.full_like(blurred, bed))
+        return cv2.threshold(diff, 12, 255, cv2.THRESH_BINARY)[1]
+
+    strategies = [("otsu", otsu), ("otsu_inv", otsu_inv), ("canny", canny), ("fondo", fondo)]
 
     kernel = np.ones((5, 5), np.uint8)
 
@@ -143,8 +179,8 @@ def _detect_document(small_img, debug_dir=None):
     # algoritmo anterior habria aceptado: en el peor caso empata.
     flojo = None
 
-    for name, mask in strategies:
-        m = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    for name, armar_mascara in strategies:
+        m = cv2.morphologyEx(armar_mascara(), cv2.MORPH_CLOSE, kernel, iterations=2)
         # Borde negro para despegar el papel que toque el limite de la imagen.
         # Se agrega por fuera en vez de pintarlo encima: pintado se comia 5 px
         # de la version reducida (unos 25 px del crudo) de cualquier documento
@@ -201,30 +237,39 @@ def _frame_margins(img):
     Una fila o columna es marco si es clara en practicamente todo su largo: un
     documento nunca la cubre entera, siempre asoma cama oscura en algun lado.
     El porcentaje viejo queda como tope, asi que nunca se recorta mas que antes.
+
+    Solo se mira la franja de cada borde que llega hasta ese tope: lo que haya
+    mas adentro no puede cambiar el resultado, y pasar a gris el crudo entero
+    para leer cuatro franjas costaba 30 ms.
     """
     import cv2
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    claro = gray > 100
-    filas = claro.mean(axis=1) > 0.98
-    columnas = claro.mean(axis=0) > 0.98
+    h, w = img.shape[:2]
+    tope_v = int(round(h * 0.0233))
+    tope_h = int(round(w * 0.0250))
+    colchon = 3  # para la transicion entre el marco y la cama
 
-    def racha(flags):
+    def racha(franja, eje, desde_el_final=False):
+        # Cuantas filas (eje=1) o columnas (eje=0) seguidas son marco, contando
+        # desde el borde de la imagen.
+        if franja.size == 0:
+            return 0
+        claro = cv2.cvtColor(franja, cv2.COLOR_BGR2GRAY) > 100
+        flags = claro.mean(axis=eje) > 0.98
+        if desde_el_final:
+            flags = flags[::-1]
         n = 0
         while n < len(flags) and flags[n]:
             n += 1
         return n
 
-    h, w = gray.shape
-    tope_v = int(round(h * 0.0233))
-    tope_h = int(round(w * 0.0250))
-    colchon = 3  # para la transicion entre el marco y la cama
-
     def margen(n, tope):
         return min(n + colchon, tope) if n else 0
 
-    return (margen(racha(filas), tope_v), margen(racha(filas[::-1]), tope_v),
-            margen(racha(columnas), tope_h), margen(racha(columnas[::-1]), tope_h))
+    return (margen(racha(img[:tope_v], 1), tope_v),
+            margen(racha(img[h - tope_v:], 1, True), tope_v),
+            margen(racha(img[:, :tope_h], 0), tope_h),
+            margen(racha(img[:, w - tope_h:], 0, True), tope_h))
 
 
 def _refine_rect(img, rect, alcance):
@@ -258,7 +303,30 @@ def _refine_rect(img, rect, alcance):
     import cv2
     import numpy as np
 
-    gray = cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (5, 5), 0)
+    alto, ancho = img.shape[:2]
+    gris_entero = []  # el crudo completo en gris suavizado, si llega a hacer falta
+
+    def gris_suavizado(mx, my):
+        # Gris suavizado de la caja que tocan los perfiles de un lado, y el
+        # origen de esa caja. Los perfiles leen unos 70.000 puntos pegados a
+        # los lados; pasar a gris y suavizar los 10 megapixeles del crudo para
+        # eso era casi todo el costo de esta funcion. El suavizado de 5x5 mira
+        # 2 px a cada lado: con ese margen de mas, cada pixel que se lee vale
+        # exactamente lo mismo que si se hubiera procesado el crudo entero.
+        xa, xb = (int(np.clip(v, 0, ancho - 1)) for v in (np.floor(mx.min()), np.ceil(mx.max())))
+        ya, yb = (int(np.clip(v, 0, alto - 1)) for v in (np.floor(my.min()), np.ceil(my.max())))
+        x0, x1 = max(xa - 2, 0), min(xb + 3, ancho)
+        y0, y1 = max(ya - 2, 0), min(yb + 3, alto)
+        if 4 * (x1 - x0) * (y1 - y0) > ancho * alto:
+            # Documento muy girado: las cajas de los cuatro lados juntas ya
+            # ocupan mas que el crudo, conviene procesarlo entero una vez.
+            if not gris_entero:
+                gris_entero.append(cv2.GaussianBlur(
+                    cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (5, 5), 0))
+            return gris_entero[0], 0, 0
+        caja = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        return cv2.GaussianBlur(caja, (5, 5), 0), x0, y0
+
     rect = np.asarray(rect, dtype=np.float64)
     sin_cambios = (rect.astype(np.float32), 0)
     centro = rect.mean(axis=0)
@@ -304,7 +372,9 @@ def _refine_rect(img, rect, alcance):
             mx = (base[:, 0:1] + offs[None, :] * n[0]).astype(np.float32)
             my = (base[:, 1:2] + offs[None, :] * n[1]).astype(np.float32)
             # Una fila por perfil, de afuera (columna 0) hacia adentro.
-            tira = cv2.remap(gray, mx, my, cv2.INTER_LINEAR,
+            gray, x0, y0 = gris_suavizado(mx, my)
+            tira = cv2.remap(gray, mx - np.float32(x0), my - np.float32(y0),
+                             cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_REPLICATE).astype(np.float64)
 
             q = max(alcance // 2, 1)
@@ -374,7 +444,8 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
     try:
         import cv2
         import numpy as np
-        img = cv2.imread(input_path)
+        import fast_io
+        img = fast_io.read_image(input_path)
         if img is None:
             return input_path, False
 
@@ -388,9 +459,11 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
                 f"Marco recortado: izq {left}, der {right}, arr {top}, abj {bottom} px."
             )
 
-        # 2. Bajar la resolucion temporalmente para procesar rapido
+        # 2. Bajar la resolucion temporalmente para procesar rapido. orig es el
+        #    mismo recorte, sin copiar: de aca en adelante solo se lee, y la
+        #    copia eran 30 MB por escaneo.
         ratio = img.shape[0] / 800.0
-        orig = img.copy()
+        orig = img
 
         if ratio > 1:
             small_img = cv2.resize(img, (int(img.shape[1] / ratio), 800))
@@ -464,7 +537,7 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
                                          flags=cv2.INTER_CUBIC)
 
             if warped.size > 0:
-                cv2.imwrite(output_path_png, warped)
+                fast_io.write_png(warped, output_path_png)
                 if log_signal:
                     log_signal.emit(
                         f"Documento detectado ({strategy}), enderezado y guardado "
@@ -482,7 +555,7 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
                 f"la cama completa ({img.shape[1]}x{img.shape[0]} px), el documento va "
                 f"a quedar mas chico dentro del archivo. Revisa que el vidrio este limpio."
             )
-        cv2.imwrite(output_path_png, img)
+        fast_io.write_png(img, output_path_png)
         return output_path_png, False
     except Exception as e:
         if log_signal:
@@ -625,11 +698,13 @@ def _warn_if_low_res(raw_path, expected_dpi, log_signal):
     caida de dpi pasa desapercibida hasta que alguien mira el archivo.
     """
     try:
-        import cv2
-        img = cv2.imread(raw_path)
-        if img is None:
+        # Solo el encabezado: decodificar los 32 MB del crudo para saber su
+        # tamano duplicaba el tiempo de lectura de cada escaneo.
+        import fast_io
+        size = fast_io.image_size(raw_path)
+        if size is None:
             return
-        h, w = img.shape[:2]
+        w, h = size
         long_side = max(w, h)
         # Una cama de tamano carta/oficio da al menos 10 pulgadas de lado largo
         est_dpi = long_side / 10.0
