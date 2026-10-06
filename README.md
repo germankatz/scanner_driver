@@ -99,6 +99,8 @@ la pena abrirlo en la primera corrida de cada jornada:
 | `Captura directa no disponible (...). Cayendo al diálogo nativo.` | El driver rechazó el control directo. Funciona igual, por el camino viejo. |
 | `AVISO: no se detectó el documento con ninguna estrategia...` | Se guardó la cama completa. El documento queda más chico dentro del archivo. |
 | `AVISO: el documento toca el borde derecho de la cama...` | El documento llega al límite de lo que ve el escáner. Si ese borde salió cortado, correlo unos milímetros hacia adentro y volvé a escanear. |
+| `Todavía no se pudo borrar doc_12_raw.bmp (Acceso denegado)...` | El escaneo salió bien. Windows no dejó borrar el crudo porque otro programa lo tenía tomado; se borra solo al empezar el escaneo siguiente o al cerrar. |
+| `AVISO: no se pudo borrar doc_12_raw.bmp (...). Hay que borrarlo a mano.` | Tampoco se pudo en el segundo intento. El escaneo está bien; sobra ese `_raw.bmp` en la carpeta. |
 
 ## Cuando algo sale mal
 

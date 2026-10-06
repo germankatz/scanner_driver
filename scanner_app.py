@@ -1,5 +1,6 @@
 import sys
 import os
+import stat
 import time
 import glob
 import json
@@ -741,6 +742,57 @@ def _warn_if_low_res(raw_path, expected_dpi, log_signal):
         pass
 
 
+# --- Borrado del crudo ------------------------------------------------------
+# El crudo se escribe, se lee y se borra en un par de segundos, casi siempre en
+# una carpeta de red. En algunas PCs Windows rechaza ese borrado con "Acceso
+# denegado" aunque el permiso esté: pasa cuando otro programa (antivirus,
+# indexador, el Explorador con la carpeta abierta) toma el archivo apenas
+# aparece. Antes eso se reportaba como error del escaneo, con el PNG ya
+# guardado, y el crudo quedaba en la carpeta.
+
+# Crudos que no se pudieron borrar al terminar su escaneo. Se vuelve a probar
+# al empezar el siguiente y al cerrar el programa.
+_crudos_pendientes = []
+
+
+def _borrar_crudo(path, intentos=6, espera=0.2):
+    """
+    Borra el crudo, insistiendo hasta un segundo si Windows no deja. Devuelve
+    None si el archivo ya no está, o el error del último intento.
+    """
+    error = None
+    for i in range(intentos):
+        if i:
+            time.sleep(espera)
+        try:
+            os.remove(path)
+            return None
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            error = e
+            if i == 0:
+                # Un archivo de solo lectura da el mismo "Acceso denegado".
+                try:
+                    os.chmod(path, stat.S_IWRITE)
+                except OSError:
+                    pass
+    return error
+
+
+def _limpiar_crudos_pendientes(log_signal=None):
+    """Segundo y último intento para los crudos que quedaron sin borrar."""
+    pendientes = _crudos_pendientes[:]
+    del _crudos_pendientes[:]
+    for path in pendientes:
+        error = _borrar_crudo(path, intentos=1)
+        if error is not None and log_signal:
+            log_signal.emit(
+                f"AVISO: no se pudo borrar {os.path.basename(path)} "
+                f"({error.strerror or error}). Hay que borrarlo a mano."
+            )
+
+
 def to_qimage(img):
     """
     La imagen procesada (ndarray BGR de 8 bits) como QImage lista para mostrar,
@@ -779,6 +831,7 @@ class ScannerThread(QThread):
         self.log_signal.emit(f"Iniciando escaneo... Guardará en {os.path.basename(self.output_path)}")
         base, ext = os.path.splitext(self.output_path)
         raw_path = f"{base}_raw.bmp"
+        _limpiar_crudos_pendientes(self.log_signal)
 
         try:
             import win32com.client
@@ -892,7 +945,15 @@ class ScannerThread(QThread):
 
                 if os.path.exists(raw_path) and raw_path != final_path:
                     if detectado:
-                        os.remove(raw_path)
+                        error = _borrar_crudo(raw_path)
+                        if error is not None:
+                            # El escaneo salió bien: no es un error ni un aviso.
+                            _crudos_pendientes.append(raw_path)
+                            self.log_signal.emit(
+                                f"Todavía no se pudo borrar {os.path.basename(raw_path)} "
+                                f"({error.strerror or error}): se vuelve a intentar "
+                                f"en el próximo escaneo."
+                            )
                     else:
                         # No se borra: sin el crudo del escaneo que fallo no hay
                         # forma de averiguar por que fallo la deteccion.
@@ -2241,4 +2302,5 @@ if __name__ == '__main__':
     app.setFont(QFont("Inter", 10))
     window = ScannerApp()
     window.show()
+    app.aboutToQuit.connect(lambda: _limpiar_crudos_pendientes())
     sys.exit(app.exec())
