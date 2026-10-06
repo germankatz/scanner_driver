@@ -108,7 +108,8 @@ from PyQt6.QtCore import (
     QByteArray, QVariantAnimation
 )
 from PyQt6.QtGui import (
-    QFont, QColor, QPixmap, QKeySequence, QShortcut, QPainter, QBrush, QIcon, QPen
+    QFont, QColor, QPixmap, QImage, QKeySequence, QShortcut, QPainter, QBrush, QIcon,
+    QPen
 )
 from PyQt6.QtSvg import QSvgRenderer
 
@@ -439,13 +440,24 @@ def _refine_rect(img, rect, alcance):
 
 def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False):
     """
+    Procesa la imagen escaneada. Devuelve (ruta_final, detectado); "detectado"
+    en False significa que se guardo la cama completa como fallback.
+    """
+    ruta, detectado, _ = process_and_crop_image(input_path, output_path, log_signal, debug_mode)
+    return ruta, detectado
+
+
+def process_and_crop_image(input_path, output_path, log_signal=None, debug_mode=False):
+    """
     Procesa la imagen escaneada mediante una transformacion de perspectiva.
     Optimizado: Reduce la resolucion para hallar contornos rapido y aplica el
     recorte en alta res. Recorta el marco plastico del escaner, medido en cada
     crudo.
 
-    Devuelve (ruta_final, detectado). "detectado" en False significa que se
-    guardo la cama completa como fallback.
+    Devuelve (ruta_final, detectado, imagen). "detectado" en False significa
+    que se guardo la cama completa como fallback. "imagen" son los pixeles que
+    quedaron en el archivo (BGR), para poder mostrarlos sin volver a leerlo y
+    decodificarlo; es None cuando no se pudo procesar nada.
     """
     output_path_png = output_path.replace('.jpg', '.png')
     try:
@@ -454,7 +466,7 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
         import fast_io
         img = fast_io.read_image(input_path)
         if img is None:
-            return input_path, False
+            return input_path, False, None
 
         # 1. Sacar el marco fisico del escaner, medido en este crudo en vez de
         #    un porcentaje fijo (ver _frame_margins).
@@ -550,7 +562,7 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
                         f"Documento detectado ({strategy}), enderezado y guardado "
                         f"sin perdida: {maxWidth}x{maxHeight} px."
                     )
-                return output_path_png, True
+                return output_path_png, True, warped
 
         # Fallback: ninguna estrategia encontro el documento. Se guarda la cama
         # entera, asi que el documento queda ocupando solo una fraccion del
@@ -563,11 +575,11 @@ def process_and_crop(input_path, output_path, log_signal=None, debug_mode=False)
                 f"a quedar mas chico dentro del archivo. Revisa que el vidrio este limpio."
             )
         fast_io.write_png(img, output_path_png)
-        return output_path_png, False
+        return output_path_png, False, img
     except Exception as e:
         if log_signal:
             log_signal.emit(f"Error en procesamiento: {e}")
-        return input_path, False
+        return input_path, False, None
 
 
 # --- WIA: control directo de la captura -------------------------------------
@@ -729,9 +741,28 @@ def _warn_if_low_res(raw_path, expected_dpi, log_signal):
         pass
 
 
+def to_qimage(img):
+    """
+    La imagen procesada (ndarray BGR de 8 bits) como QImage lista para mostrar,
+    o None si no hay imagen o no tiene ese formato.
+
+    Se puede llamar desde el hilo de escaneo: QImage no depende del hilo de la
+    ventana. La conversion copia los pixeles, asi que el resultado no queda
+    atado al ndarray.
+    """
+    if img is None or img.ndim != 3 or img.shape[2] != 3 or img.dtype.name != "uint8":
+        return None
+    import numpy as np
+    img = np.ascontiguousarray(img)
+    h, w = img.shape[:2]
+    vista = QImage(img.data, w, h, img.strides[0], QImage.Format.Format_BGR888)
+    return vista.convertToFormat(QImage.Format.Format_RGB32)
+
+
 class ScannerThread(QThread):
     log_signal = pyqtSignal(str)
-    image_signal = pyqtSignal(str, bool)  # ruta final, documento detectado
+    # ruta final, documento detectado, imagen ya lista para mostrar (QImage o None)
+    image_signal = pyqtSignal(str, bool, object)
     finished_signal = pyqtSignal()
 
     def __init__(self, scanner_name, output_path, debug_mode, is_first_scan=False,
@@ -849,9 +880,15 @@ class ScannerThread(QThread):
                 _warn_if_low_res(raw_path, self.dpi, self.log_signal)
 
                 self.log_signal.emit("Procesando imagen (Enderezado y recorte automático)...")
-                final_path, detectado = process_and_crop(
+                final_path, detectado, imagen = process_and_crop_image(
                     raw_path, self.output_path, self.log_signal, self.debug_mode
                 )
+                # La imagen se manda ya convertida, desde este hilo. Si la
+                # ventana tuviera que releer y decodificar el PNG recién
+                # guardado, se congelaría unos 75 ms por escaneo (200 con la
+                # cama completa).
+                if final_path:
+                    self.image_signal.emit(final_path, detectado, to_qimage(imagen))
 
                 if os.path.exists(raw_path) and raw_path != final_path:
                     if detectado:
@@ -863,9 +900,6 @@ class ScannerThread(QThread):
                             f"Se conservó el crudo del escaneo fallido en "
                             f"{os.path.basename(raw_path)} para diagnóstico."
                         )
-
-                if final_path:
-                    self.image_signal.emit(final_path, detectado)
 
             pythoncom.CoUninitialize()
 
@@ -1867,10 +1901,10 @@ class ScannerApp(QMainWindow):
                 class _LogDirecto:
                     def __init__(self, fn): self.emit = fn
 
-                final_path, detectado = process_and_crop(
+                final_path, detectado, imagen = process_and_crop_image(
                     file_path, out_path, _LogDirecto(self.log_to_console), debug_active
                 )
-                self.display_image(final_path, detectado)
+                self.display_image(final_path, detectado, to_qimage(imagen))
                 if debug_active:
                     self.log_to_console(
                         f"Máscaras de diagnóstico escritas en {os.path.dirname(out_path)}"
@@ -1965,9 +1999,15 @@ class ScannerApp(QMainWindow):
         self.lbl_preview.setPixmap(rounded)
         self.preview_shadow.setEnabled(True)
 
-    @pyqtSlot(str, bool)
-    def display_image(self, filepath, detectado=True):
-        pixmap = QPixmap(filepath)
+    @pyqtSlot(str, bool, object)
+    def display_image(self, filepath, detectado=True, imagen=None):
+        # Lo normal es que la imagen llegue ya en memoria desde quien la
+        # procesó. Leerla del archivo queda para cuando no vino (por ejemplo,
+        # un crudo que no se pudo procesar y se muestra tal cual).
+        if isinstance(imagen, QImage) and not imagen.isNull():
+            pixmap = QPixmap.fromImage(imagen)
+        else:
+            pixmap = QPixmap(filepath)
         if pixmap.isNull():
             self.set_preview_text("Error al cargar la imagen.")
             return
