@@ -48,16 +48,16 @@ def sha(ruta):
 
 
 def procesos(base):
-    """[(pid, ruta del ejecutable)] de los procesos que corren desde `base`."""
+    """[(pid, ruta del ejecutable, línea de comandos)] de los procesos que corren desde `base`."""
     salida = subprocess.run(
         ["powershell", "-NoProfile", "-Command",
          "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and "
          "$_.ExecutablePath.StartsWith($env:PRUEBA_BASE, 'OrdinalIgnoreCase') } | "
-         "ForEach-Object { \"$($_.ProcessId)|$($_.ExecutablePath)\" }"],
+         "ForEach-Object { \"$($_.ProcessId)|$($_.ExecutablePath)|$($_.CommandLine)\" }"],
         env=dict(os.environ, PRUEBA_BASE=base), capture_output=True, text=True,
     ).stdout
-    return [(int(pid), ruta) for pid, ruta in
-            (linea.split("|", 1) for linea in salida.splitlines() if "|" in linea)]
+    return [(int(pid), ruta, comando) for pid, ruta, comando in
+            (linea.split("|", 2) for linea in salida.splitlines() if linea.count("|") >= 2)]
 
 
 def main():
@@ -101,8 +101,11 @@ def main():
                 reemplazado = sha(exe_instalado) == esperado
             except OSError:
                 reemplazado = False     # lo están reemplazando justo ahora
+            # El programa tiene que volver a abrir, y sabiendo que lo actualizaron
+            # (así avisa "Actualizado a la versión ..." al pie).
             abierto = any(os.path.normcase(ruta) == os.path.normcase(exe_instalado)
-                          for _, ruta in procesos(base))
+                          and "--actualizado" in comando
+                          for _, ruta, comando in procesos(base))
             sin_restos = not os.path.exists(exe_nuevo)
             print(f"  reemplazado={reemplazado} abierto={abierto} sin_restos={sin_restos}")
             if reemplazado and abierto and sin_restos:
@@ -112,7 +115,7 @@ def main():
                 break
             time.sleep(2)
     finally:
-        for pid, _ in procesos(base):
+        for pid, _, _ in procesos(base):
             subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
         time.sleep(2)
         shutil.rmtree(base, ignore_errors=True)

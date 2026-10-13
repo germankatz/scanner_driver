@@ -1470,7 +1470,7 @@ class ScannerApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("La bestia")
+        self.setWindowTitle(f"La bestia {actualizador.VERSION}")
         self.resize(800, 700)
         cfg = load_config()
         self.output_dir = cfg.get("output_dir") or DEFAULT_OUTPUT_DIR
@@ -1564,7 +1564,10 @@ class ScannerApp(QMainWindow):
         self.btn_info.setIcon(icon("info", "#CCCCCC", 18))
         self.btn_info.setIconSize(QSize(18, 18))
         self.btn_info.setObjectName("infoButton")
-        self.btn_info.setToolTip(f"La bestia {actualizador.VERSION}: versión y actualizaciones")
+        # La versión va a la vista, en el mismo botón: después de actualizar
+        # se ve de un vistazo que cambió.
+        self.btn_info.setText(f" {actualizador.VERSION}")
+        self.btn_info.setToolTip("Versión del programa y actualizaciones")
         self.btn_info.clicked.connect(self.open_about)
         self.btn_update = QPushButton()
         self.btn_update.setIcon(icon("descargar", "#FFFFFF"))
@@ -1961,10 +1964,17 @@ class ScannerApp(QMainWindow):
 
     def show_warning(self, message, color):
         """Aviso o error en pocas palabras, al pie. El texto completo queda en el registro."""
-        self.lbl_status_icon.setPixmap(icon_pixmap("alerta", color, 14))
+        self._show_status("alerta", color, _aviso_corto(message), message)
+
+    def show_notice(self, message):
+        """Una buena noticia al pie, hasta el próximo escaneo."""
+        self._show_status("tilde", "#6FCF73", message, message)
+
+    def _show_status(self, icono, color, corto, completo):
+        self.lbl_status_icon.setPixmap(icon_pixmap(icono, color, 14))
         self.lbl_status.setStyleSheet(f"color: {color};")
-        self.lbl_status.setText(_aviso_corto(message))
-        self.lbl_status.setToolTip(message)
+        self.lbl_status.setText(corto)
+        self.lbl_status.setToolTip(completo)
         self.lbl_status_icon.setVisible(True)
         self.lbl_status.setVisible(True)
 
@@ -2515,6 +2525,10 @@ class ScannerApp(QMainWindow):
             font-size: 16px;
             padding: 5px 12px;
         }
+        #infoButton {
+            color: #CCCCCC;
+            font-size: 12px;
+        }
         #debugButton:hover, #infoButton:hover {
             background-color: #404040;
         }
@@ -2585,7 +2599,11 @@ def run_instalar(app, destino):
                 "No se pudo actualizar: el programa sigue abierto, quizás en otra "
                 "sesión de esta PC.\n\nSe abre la versión que ya estaba instalada."
             )
-        actualizador.abrir(destino)
+        if error is None:
+            # Con este aviso el programa dice, al abrir, que quedó actualizado.
+            actualizador.abrir(destino, "--actualizado")
+        else:
+            actualizador.abrir(destino)
         # El programa tarda unos segundos en aparecer: el cartel queda hasta
         # entonces, para que nadie crea que no pasó nada y lo abra de nuevo.
         QTimer.singleShot(0 if error is not None else 4000, app.quit)
@@ -2608,6 +2626,11 @@ if __name__ == '__main__':
         sys.exit(run_instalar(app, sys.argv[sys.argv.index("--instalar") + 1]))
     window = ScannerApp()
     window.show()
+    if "--actualizado" in sys.argv:
+        window.log_to_console(f"Programa actualizado a la versión {actualizador.VERSION}.")
+        # Si hay un aviso al pie (destino no disponible), ese importa más.
+        if not window.lbl_status.isVisible():
+            window.show_notice(f"Actualizado a la versión {actualizador.VERSION}")
     window.check_updates()
     app.aboutToQuit.connect(lambda: _limpiar_crudos_pendientes())
     sys.exit(app.exec())

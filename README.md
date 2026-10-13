@@ -58,8 +58,11 @@ Propiedades > Detalles), así que no hay que renombrarlo ni copiar nada más.
 Al abrir, el programa mira esa carpeta. Si hay una versión más nueva aparece
 arriba el botón **Actualizar a x.y.z**, y con **Actualizar ahora** el programa
 se cierra, se reemplaza y vuelve a abrir solo, para todos los usuarios de esa
-PC. El botón de información, arriba a la derecha, muestra la versión instalada
-y tiene **Buscar actualizaciones** para no esperar al próximo arranque.
+PC. Al volver a abrir, al pie dice «Actualizado a la versión x.y.z».
+
+La versión instalada está siempre a la vista: en el título de la ventana y en
+el botón de información, arriba a la derecha. Ese botón abre **Buscar
+actualizaciones**, para no esperar al próximo arranque.
 
 Cualquier usuario de la PC puede modificar `C:\LaBestia`: es lo que permite
 actualizar sin una cuenta con permisos. En la carpeta de actualizaciones, en
