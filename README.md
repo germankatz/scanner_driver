@@ -37,14 +37,15 @@ el Escritorio público no pueden. Por eso, en una PC que usan varias personas:
 
 1. Copiá `LaBestia.exe` e `instalar.cmd` (los dos vienen en el release) a una
    misma carpeta. La de actualizaciones sirve.
-2. En cada PC, desde una cuenta que pueda escribir en el Escritorio público,
-   ejecutá `instalar.cmd`. Deja el programa en `C:\LaBestia`, crea el acceso
-   directo **La bestia** en el escritorio de todos los usuarios y borra el
-   `LaBestia.exe` o `AntigravityScanner.exe` suelto que hubiera ahí.
+2. En cada PC, entrá con una cuenta de administrador y abrí `instalar.cmd` con
+   doble clic. Si hacen falta permisos elevados los pide solo (Windows pregunta
+   una vez). Deja el programa en `C:\LaBestia`, le saca la marca de «bajado de
+   internet» para que Windows no muestre una advertencia cada vez que alguien
+   lo abre, crea el acceso directo **La bestia** en el escritorio de todos los
+   usuarios y borra el `LaBestia.exe` o `AntigravityScanner.exe` suelto que
+   hubiera ahí.
 
-Se hace una sola vez por PC. Si hay que usar «Ejecutar como administrador»,
-copiá antes los dos archivos a una carpeta de la PC: con permisos elevados
-Windows no ve las unidades de red.
+Se hace una sola vez por PC.
 
 ### Actualizar
 
