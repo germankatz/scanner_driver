@@ -32,7 +32,7 @@ import time
 
 # La versión del programa. El tag del release tiene que ser "v" + esto: CI lo
 # verifica, y también que el ejecutable la lleve en su recurso de versión.
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 
 EXE = "LaBestia.exe"
 EXE_NUEVO = "LaBestia.nuevo.exe"    # el ejecutable nuevo mientras se instala

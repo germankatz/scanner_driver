@@ -5,6 +5,8 @@ import time
 import glob
 import json
 import html
+import math
+import random
 import threading
 
 import actualizador
@@ -1382,6 +1384,138 @@ class BusyBar(QWidget):
             p.drawRoundedRect(QRectF(0, 0, w, h), h / 2, h / 2)
 
 
+class ConfettiOverlay(QWidget):
+    """
+    Lluvia de papelitos que sale de un punto de la ventana y cae con gravedad.
+    Se dibuja con QPainter sobre una capa transparente que no toma clics, y se
+    destruye sola cuando el último papelito se desvanece. Las bibliotecas de
+    confeti para la web necesitarían un navegador embebido (QtWebEngine, más de
+    100 MB): así no agrega nada al ejecutable.
+    """
+
+    COLORES = ["#D84315", "#F0C36B", "#6FCF73", "#569CD6", "#C586C0", "#FFFFFF"]
+    DURACION = 2.6     # segundos hasta que desaparece todo
+    CUADRO_MS = 16     # unos 60 cuadros por segundo
+
+    def __init__(self, parent, origen, cantidad=140):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setStyleSheet("background: transparent;")
+        self.setGeometry(parent.rect())
+        rnd = random.Random()
+        self._papelitos = []
+        for _ in range(cantidad):
+            # Abanico hacia arriba: el contador está al pie de la ventana.
+            angulo = math.radians(-90 + rnd.uniform(-50, 50))
+            velocidad = rnd.uniform(380, 900)            # píxeles por segundo
+            self._papelitos.append({
+                "x": float(origen.x()), "y": float(origen.y()),
+                "vx": math.cos(angulo) * velocidad,
+                "vy": math.sin(angulo) * velocidad,
+                "giro": rnd.uniform(0, 360),
+                "vgiro": rnd.uniform(-540, 540),         # grados por segundo
+                "fase": rnd.uniform(0, math.tau),        # para el bamboleo
+                "ancho": rnd.uniform(6, 10),
+                "alto": rnd.uniform(3, 6),
+                "redondo": rnd.random() < 0.3,
+                "color": QColor(rnd.choice(self.COLORES)),
+            })
+        self._inicio = time.perf_counter()
+        self._ultimo = self._inicio
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._avanzar)
+        self._timer.start(self.CUADRO_MS)
+        parent.installEventFilter(self)
+        self.raise_()
+        self.show()
+
+    def eventFilter(self, obj, event):
+        if obj is self.parent() and event.type() == QEvent.Type.Resize:
+            self.setGeometry(obj.rect())
+        return False
+
+    def _avanzar(self):
+        ahora = time.perf_counter()
+        dt = min(ahora - self._ultimo, 0.05)
+        self._ultimo = ahora
+        if ahora - self._inicio >= self.DURACION:
+            self._timer.stop()
+            self.parent().removeEventFilter(self)
+            self.deleteLater()
+            return
+        # Rozamiento del aire: frena rápido en horizontal y limita la caída.
+        freno = 0.985 ** (dt * 60)
+        for p in self._papelitos:
+            p["vx"] *= freno
+            p["vy"] = p["vy"] * freno + 1400 * dt      # gravedad
+            p["x"] += p["vx"] * dt
+            p["y"] += p["vy"] * dt
+            p["giro"] += p["vgiro"] * dt
+            p["fase"] += 8 * dt
+        self.update()
+
+    def paintEvent(self, event):
+        transcurrido = time.perf_counter() - self._inicio
+        # Opaco al principio; se desvanece en el último tercio.
+        resto = 1 - transcurrido / self.DURACION
+        opacidad = max(0.0, min(1.0, resto * 3))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setOpacity(opacidad)
+        for c in self._papelitos:
+            p.save()
+            p.translate(c["x"], c["y"])
+            p.rotate(c["giro"])
+            # Achatar un eje simula que el papelito da vueltas en el aire.
+            p.scale(1.0, abs(math.cos(c["fase"])) * 0.8 + 0.2)
+            p.setBrush(c["color"])
+            w, h = c["ancho"], c["alto"]
+            if c["redondo"]:
+                p.drawEllipse(QRectF(-h, -h, 2 * h, 2 * h))
+            else:
+                p.drawRect(QRectF(-w / 2, -h / 2, w, h))
+            p.restore()
+
+
+class ContadorEscaneos(QPushButton):
+    """
+    Cuántas imágenes se escanearon desde el último canje. Al llegar a META se
+    habilita: un clic lo canjea (confeti) y vuelve a cero.
+    """
+
+    canjeado = pyqtSignal()
+    META = 10
+
+    def __init__(self, valor=0, parent=None):
+        super().__init__(parent)
+        self.setObjectName("contadorEscaneos")
+        self.clicked.connect(self._canjear)
+        self.set_valor(valor)
+
+    def set_valor(self, valor):
+        self.valor = max(0, int(valor))
+        self.setText(str(self.valor))
+        listo = self.valor >= self.META
+        self.setEnabled(listo)
+        self.setProperty("listo", listo)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if listo
+                       else Qt.CursorShape.ArrowCursor)
+        self.setToolTip("Canjear" if listo else
+                        f"Imágenes escaneadas. Faltan {self.META - self.valor} para canjear.")
+        # La hoja de estilos no se entera sola de que cambió la propiedad.
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def sumar(self):
+        self.set_valor(self.valor + 1)
+
+    def _canjear(self):
+        if self.valor >= self.META:
+            self.canjeado.emit()
+
+
 class FlatComboBox(QComboBox):
     """
     Desplegable plano. El que dibuja Windows por defecto trae un botón con
@@ -1516,6 +1650,10 @@ class ScannerApp(QMainWindow):
         # de las otras resoluciones. Arranca con el de una ficha típica y se
         # corrige con cada escaneo real.
         self._mb_a_300 = 4.4
+        # Imágenes escaneadas desde el último canje. Se recuerda entre sesiones.
+        self._escaneos = cfg.get("contador_escaneos", 0)
+        if not isinstance(self._escaneos, int):
+            self._escaneos = 0
 
         self.setup_ui()
         self.apply_dark_theme()
@@ -1725,6 +1863,8 @@ class ScannerApp(QMainWindow):
         self.btn_log.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_log.setToolTip("Muestra u oculta el registro de mensajes")
         self.btn_log.toggled.connect(self.toggle_log)
+        self.contador = ContadorEscaneos(self._escaneos)
+        self.contador.canjeado.connect(self.canjear_contador)
         self.lbl_status_icon = QLabel()
         self.lbl_status = ElidedLabel()
         self.lbl_status.setObjectName("statusLine")
@@ -1738,6 +1878,7 @@ class ScannerApp(QMainWindow):
         pie_layout.addWidget(self.lbl_status)
         pie_layout.addSpacing(6)
         pie_layout.addWidget(self.btn_log)
+        pie_layout.addWidget(self.contador)
         main_layout.addLayout(pie_layout)
         self.clear_warning()
 
@@ -2040,6 +2181,7 @@ class ScannerApp(QMainWindow):
         self.is_first_scan = False
         self.thread.log_signal.connect(self.log_to_console)
         self.thread.image_signal.connect(self.display_image)
+        self.thread.image_signal.connect(self.contar_escaneo)
         self.thread.finished_signal.connect(self.scan_finished)
         self.thread.start()
 
@@ -2062,8 +2204,25 @@ class ScannerApp(QMainWindow):
                                     manual_mode=True, dpi=self.scan_dpi)
         self.thread.log_signal.connect(self.log_to_console)
         self.thread.image_signal.connect(self.display_image)
+        self.thread.image_signal.connect(self.contar_escaneo)
         self.thread.finished_signal.connect(self.scan_finished)
         self.thread.start()
+
+    def contar_escaneo(self, *_):
+        self.contador.sumar()
+        self._guardar_contador()
+
+    def canjear_contador(self):
+        centro = self.contador.rect().center()
+        ConfettiOverlay(self.centralWidget(),
+                        self.contador.mapTo(self.centralWidget(), centro))
+        self.contador.set_valor(0)
+        self._guardar_contador()
+
+    def _guardar_contador(self):
+        ok, detalle = save_config(contador_escaneos=self.contador.valor)
+        if not ok:
+            self.log_to_console(f"AVISO: no se pudo guardar el contador ({detalle}).")
 
     @pyqtSlot()
     def scan_finished(self):
@@ -2441,6 +2600,29 @@ class ScannerApp(QMainWindow):
         }
         #linkButton:hover {
             color: #8CC4F2;
+        }
+        /* Contador de escaneos, al lado de Registro. Apagado hasta llegar a
+           la meta; ahí se enciende y se puede canjear. */
+        #contadorEscaneos {
+            background-color: #2A2A2A;
+            color: #8A8A8A;
+            border: 1px solid #383838;
+            border-radius: 10px;
+            min-width: 22px;
+            padding: 1px 6px;
+            font-size: 12px;
+        }
+        #contadorEscaneos[listo="true"] {
+            background-color: #D84315;
+            color: white;
+            border: 1px solid #E5501F;
+            font-weight: bold;
+        }
+        #contadorEscaneos[listo="true"]:hover {
+            background-color: #E5501F;
+        }
+        #contadorEscaneos[listo="true"]:pressed {
+            background-color: #B5380F;
         }
         #mutedLabel {
             color: #9A9A9A;
