@@ -44,6 +44,8 @@ jobs:
       - name: Verificar que la versión tiene sus novedades
         shell: python
         run: |
+          import os, sys
+          sys.path.insert(0, os.getcwd())   # el script corre desde una carpeta temporal
           import actualizador as a
           versiones = [v for v, _ in a.NOVEDADES]
           if not versiones or versiones[0] != a.VERSION:
