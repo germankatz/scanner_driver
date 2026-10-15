@@ -39,6 +39,16 @@ jobs:
             exit 1
           }
 
+      # Cada versión dice qué cambió: se muestra en "Acerca de". Se revisa
+      # también en main, para enterarse antes de crear el tag.
+      - name: Verificar que la versión tiene sus novedades
+        shell: python
+        run: |
+          import actualizador as a
+          versiones = [v for v, _ in a.NOVEDADES]
+          if not versiones or versiones[0] != a.VERSION:
+              raise SystemExit(f"Falta la entrada de {a.VERSION} al principio de actualizador.NOVEDADES")
+
       - name: Verificar que el módulo importa
         run: python -c "import scanner_app; print('import OK')"
 

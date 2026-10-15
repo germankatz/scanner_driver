@@ -32,7 +32,43 @@ import time
 
 # La versión del programa. El tag del release tiene que ser "v" + esto: CI lo
 # verifica, y también que el ejecutable la lleve en su recurso de versión.
-VERSION = "1.4.0"
+VERSION = "1.5.0"
+
+# Qué cambió en cada versión, la más nueva primero. Se muestra en "Acerca de",
+# en palabras de quien usa el programa. CI no deja publicar una versión que no
+# tenga su entrada acá.
+NOVEDADES = [
+    ("1.5.0", [
+        "El contador cambia de color con cada escaneo: bronce, plata, oro y diamante.",
+        "Un festejo distinto al canjear a los 10, 25, 50 y 100 escaneos.",
+        "La actualización muestra en qué paso va y cuánto lleva copiado.",
+        "Las novedades de cada versión, acá.",
+    ]),
+    ("1.4.0", [
+        "Contador de imágenes escaneadas al lado de Registro. A las 10 se canjea, con confeti.",
+    ]),
+    ("1.3.1", [
+        "La versión se ve en el título de la ventana y en el botón de arriba.",
+        "Aviso al pie cuando el programa terminó de actualizarse.",
+        "instalar.cmd hace todo en un solo paso.",
+    ]),
+    ("1.3.0", [
+        "El programa se actualiza solo desde la carpeta compartida.",
+        "Si el archivo crudo tarda en liberarse, se reintenta en vez de dar el escaneo por fallido.",
+    ]),
+    ("1.2.0", ["El programa pasa a llamarse La bestia."]),
+    ("1.1.1", ["La vista previa aparece más rápido."]),
+    ("1.1.0", [
+        "Ventana renovada: barra de calidad, íconos nuevos, registro plegable y avisos cortos.",
+        "El procesamiento es 3,5 veces más rápido.",
+        "Recorte más preciso de los cuatro bordes.",
+    ]),
+    ("1.0.4", ["El recorte mide el marco del escáner en vez de sacar un margen fijo."]),
+    ("1.0.3", ["La vista previa se ajusta cuando cambia el tamaño de la ventana."]),
+    ("1.0.2", ["Cada versión se prueba antes de publicarse."]),
+    ("1.0.1", ["Funciona el botón para procesar un archivo ya escaneado."]),
+    ("1.0.0", ["Primera versión: resolución fija y la configuración se recuerda."]),
+]
 
 EXE = "LaBestia.exe"
 EXE_NUEVO = "LaBestia.nuevo.exe"    # el ejecutable nuevo mientras se instala
@@ -148,10 +184,26 @@ def impedimento():
     return None
 
 
-def _copiar(origen, destino):
-    """Copia sin dejar nunca un archivo a medias con el nombre de destino."""
+def _copiar(origen, destino, progreso=None):
+    """
+    Copia sin dejar nunca un archivo a medias con el nombre de destino. Con
+    `progreso`, copia de a pedazos y lo llama con (bytes copiados, total).
+    """
     try:
-        shutil.copyfile(origen, destino)
+        if progreso is None:
+            shutil.copyfile(origen, destino)
+        else:
+            total = os.path.getsize(origen)
+            copiado = 0
+            progreso(copiado, total)
+            with open(origen, "rb") as f_origen, open(destino, "wb") as f_destino:
+                while True:
+                    pedazo = f_origen.read(1 << 20)
+                    if not pedazo:
+                        break
+                    f_destino.write(pedazo)
+                    copiado += len(pedazo)
+                    progreso(copiado, total)
     except BaseException:
         try:
             os.remove(destino)
@@ -160,15 +212,16 @@ def _copiar(origen, destino):
         raise
 
 
-def preparar(origen):
+def preparar(origen, progreso=None):
     """
     Trae el ejecutable publicado al lado del instalado, como LaBestia.nuevo.exe,
-    y devuelve esa ruta. Toca la red: no llamar desde el hilo de la ventana.
+    y devuelve esa ruta. `progreso`, si se pasa, recibe (bytes copiados, total).
+    Toca la red: no llamar desde el hilo de la ventana.
     """
     nuevo = os.path.join(os.path.dirname(sys.executable), EXE_NUEVO)
     parcial = nuevo + _PARCIAL
     antes = os.stat(origen)
-    _copiar(origen, parcial)
+    _copiar(origen, parcial, progreso)
     despues = os.stat(origen)
     # Si justo lo estaban publicando, lo copiado puede ser mitad de cada uno.
     cambio = (despues.st_size, despues.st_mtime_ns) != (antes.st_size, antes.st_mtime_ns)
@@ -195,24 +248,33 @@ def lanzar_instalacion(nuevo):
     abrir(nuevo, "--instalar", sys.executable)
 
 
-def instalar(destino, espera=30):
+def instalar(destino, espera=30, aviso=None):
     """
     Lo corre el ejecutable nuevo: se copia encima de `destino` (el instalado)
     apenas este termina de cerrarse. Devuelve None, o el error si en `espera`
     segundos no se pudo: el programa sigue abierto, por ejemplo en otra sesión
     de la misma PC. No abre nada; eso queda para quien llama.
+
+    `aviso`, si se pasa, recibe la etapa en curso: "copiando" o "esperando"
+    (a que el instalado termine de cerrarse).
     """
     parcial = destino + _PARCIAL
     limite = time.monotonic() + espera
+    esperando = False
     while True:
         try:
             # Primero una copia completa al lado y recién después el cambio de
             # nombre: el instalado nunca queda a medio escribir.
             if not os.path.exists(parcial):
+                if aviso:
+                    aviso("copiando")
                 _copiar(sys.executable, parcial)
             os.replace(parcial, destino)
             return None
         except OSError as error:
+            if aviso and not esperando:
+                esperando = True
+                aviso("esperando")
             if time.monotonic() > limite:
                 try:
                     os.remove(parcial)

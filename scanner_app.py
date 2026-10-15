@@ -130,11 +130,11 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, pyqtSlot, QEvent, QSize, QRectF, QLineF,
-    QByteArray, QVariantAnimation, QTimer
+    QByteArray, QVariantAnimation, QTimer, QPointF
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPixmap, QImage, QKeySequence, QShortcut, QPainter, QBrush, QIcon,
-    QPen
+    QPen, QPolygonF, QPainterPath, QRadialGradient
 )
 from PyQt6.QtSvg import QSvgRenderer
 
@@ -1113,7 +1113,7 @@ class AcercaDialog(QDialog):
         super().__init__(ventana)
         self.ventana = ventana
         self.setWindowTitle("Acerca de La bestia")
-        self.setFixedSize(430, 220)
+        self.setFixedSize(460, 440)
         self.setStyleSheet(ventana.styleSheet())
 
         layout = QVBoxLayout(self)
@@ -1127,10 +1127,22 @@ class AcercaDialog(QDialog):
         layout.addWidget(version)
         layout.addSpacing(14)
 
+        # El estado de las actualizaciones, con una ruedita mientras hay algo
+        # en curso. Alto fijo para que los botones no salten cuando el texto
+        # pasa de una línea a dos.
+        self.spinner = Spinner(16)
         self.lbl_estado = QLabel()
         self.lbl_estado.setWordWrap(True)
         self.lbl_estado.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(self.lbl_estado, stretch=1)
+        estado = QHBoxLayout()
+        estado.setSpacing(8)
+        estado.addWidget(self.spinner, alignment=Qt.AlignmentFlag.AlignTop)
+        estado.addWidget(self.lbl_estado, stretch=1)
+        caja_estado = QWidget()
+        caja_estado.setFixedHeight(56)
+        caja_estado.setLayout(estado)
+        estado.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(caja_estado)
 
         self.btn_buscar = QPushButton(" Buscar actualizaciones")
         self.btn_buscar.setIcon(icon("refrescar", "#CCCCCC"))
@@ -1147,13 +1159,42 @@ class AcercaDialog(QDialog):
         botones.addStretch()
         botones.addWidget(self.btn_actualizar)
         layout.addLayout(botones)
+
+        layout.addSpacing(16)
+        lbl_novedades = QLabel("Novedades")
+        lbl_novedades.setObjectName("mutedLabel")
+        layout.addWidget(lbl_novedades)
+        layout.addSpacing(4)
+        self.novedades = QTextEdit()
+        self.novedades.setObjectName("novedades")
+        self.novedades.setReadOnly(True)
+        self.novedades.setHtml(self.html_novedades())
+        layout.addWidget(self.novedades, stretch=1)
         self.refrescar()
+
+    @staticmethod
+    def html_novedades():
+        """Las novedades de cada versión, la más nueva primero."""
+        partes = []
+        for version, cambios in actualizador.NOVEDADES:
+            actual = " (esta)" if version == actualizador.VERSION else ""
+            items = "".join(f"<li>{html.escape(c)}</li>" for c in cambios)
+            partes.append(
+                f"<p style='margin: 6px 0 2px 0; color: #FFFFFF; font-weight: bold;'>"
+                f"{version}{actual}</p>"
+                f"<ul style='margin: 0 0 6px -18px;'>{items}</ul>"
+            )
+        return "".join(partes)
 
     def refrescar(self):
         texto, ocupado, se_puede = self.ventana.estado_actualizacion()
         self.lbl_estado.setText(texto)
         self.btn_buscar.setEnabled(not ocupado)
         self.btn_actualizar.setVisible(se_puede)
+        if ocupado:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
 
 # Iconos de linea (trazos de Tabler Icons, licencia MIT), en una grilla de
 # 24x24. Reemplazan a los emoji, que cada version de Windows dibuja distinto y
@@ -1384,43 +1425,48 @@ class BusyBar(QWidget):
             p.drawRoundedRect(QRectF(0, 0, w, h), h / 2, h / 2)
 
 
-class ConfettiOverlay(QWidget):
+class Festejo(QWidget):
     """
-    Lluvia de papelitos que sale de un punto de la ventana y cae con gravedad.
-    Se dibuja con QPainter sobre una capa transparente que no toma clics, y se
-    destruye sola cuando el último papelito se desvanece. Las bibliotecas de
-    confeti para la web necesitarían un navegador embebido (QtWebEngine, más de
-    100 MB): así no agrega nada al ejecutable.
+    Festejo del canje del contador, dibujado con QPainter sobre una capa
+    transparente que cubre la ventana y no toma clics. Cambia según el
+    escalón canjeado: confeti (10), confeti grande y desparramado (25), fuegos
+    artificiales (50) y un diamante con rayos y marquesina de casino (100).
+    Se destruye sola al terminar. Las bibliotecas de confeti para la web
+    necesitarían un navegador embebido (QtWebEngine, más de 100 MB): así no
+    agrega nada al ejecutable.
     """
 
     COLORES = ["#D84315", "#F0C36B", "#6FCF73", "#569CD6", "#C586C0", "#FFFFFF"]
-    DURACION = 2.6     # segundos hasta que desaparece todo
+    DORADOS = ["#FFC83D", "#FFE08A", "#FFFFFF", "#F0C36B"]
+    HIELO = ["#9FF0FF", "#FFFFFF", "#CFF7FF", "#5CC9E0"]
+    # Colores de los fuegos artificiales: cada explosión usa una paleta.
+    PALETAS_FUEGOS = [
+        ["#FFC83D", "#FFE08A"], ["#FFFFFF", "#CFF7FF"], ["#FF6B4A", "#FFC83D"],
+        ["#6FCF73", "#E9FFD9"], ["#569CD6", "#BFE3FF"], ["#C586C0", "#FFD6F6"],
+    ]
+    DURACIONES = {10: 3.0, 25: 4.2, 50: 5.6, 100: 5.0}
     CUADRO_MS = 16     # unos 60 cuadros por segundo
+    GRAVEDAD = 1400    # píxeles por segundo al cuadrado, para el confeti
 
-    def __init__(self, parent, origen, cantidad=140):
+    def __init__(self, parent, origen, nivel):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setStyleSheet("background: transparent;")
         self.setGeometry(parent.rect())
-        rnd = random.Random()
-        self._papelitos = []
-        for _ in range(cantidad):
-            # Abanico hacia arriba: el contador está al pie de la ventana.
-            angulo = math.radians(-90 + rnd.uniform(-50, 50))
-            velocidad = rnd.uniform(380, 900)            # píxeles por segundo
-            self._papelitos.append({
-                "x": float(origen.x()), "y": float(origen.y()),
-                "vx": math.cos(angulo) * velocidad,
-                "vy": math.sin(angulo) * velocidad,
-                "giro": rnd.uniform(0, 360),
-                "vgiro": rnd.uniform(-540, 540),         # grados por segundo
-                "fase": rnd.uniform(0, math.tau),        # para el bamboleo
-                "ancho": rnd.uniform(6, 10),
-                "alto": rnd.uniform(3, 6),
-                "redondo": rnd.random() < 0.3,
-                "color": QColor(rnd.choice(self.COLORES)),
-            })
+        self._rnd = random.Random()
+        self._origen = (float(origen.x()), float(origen.y()))
+        self._nivel = nivel
+        self._duracion = self.DURACIONES[nivel]
+        self._particulas = []
+        self._nuevas = []       # lo que aparece durante un cuadro (chispas, tandas)
+        self._agenda = []       # (segundo, función): lo que se larga más tarde
+        self._t = 0.0
+        {10: self._armar_10, 25: self._armar_25,
+         50: self._armar_50, 100: self._armar_100}[nivel]()
+        self._agenda.sort(key=lambda e: e[0])
+        self._particulas, self._nuevas = self._nuevas, []
+
         self._inicio = time.perf_counter()
         self._ultimo = self._inicio
         self._timer = QTimer(self)
@@ -1435,85 +1481,467 @@ class ConfettiOverlay(QWidget):
             self.setGeometry(obj.rect())
         return False
 
+    # --- Armado de cada festejo ---
+
+    def _confeti(self, x, y, cantidad, angulo, abanico, vmin, vmax,
+                 tamano=(1.0, 1.0), colores=None, vida=(2.2, 3.0)):
+        """Tanda de papelitos que sale de (x, y) hacia angulo ± abanico (grados)."""
+        rnd = self._rnd
+        colores = colores or self.COLORES
+        for _ in range(cantidad):
+            a = math.radians(angulo + rnd.uniform(-abanico, abanico))
+            v = rnd.uniform(vmin, vmax)
+            esc = rnd.uniform(*tamano)
+            self._nuevas.append({
+                "tipo": "papel", "x": x, "y": y,
+                "vx": math.cos(a) * v, "vy": math.sin(a) * v,
+                "giro": rnd.uniform(0, 360), "vgiro": rnd.uniform(-540, 540),
+                "fase": rnd.uniform(0, math.tau),        # para el bamboleo
+                "ancho": rnd.uniform(6, 10) * esc, "alto": rnd.uniform(3, 6) * esc,
+                "redondo": rnd.random() < 0.3,
+                "color": QColor(rnd.choice(colores)),
+                "edad": 0.0, "vida": rnd.uniform(*vida),
+            })
+
+    def _armar_10(self):
+        # Abanico hacia arriba: el contador está al pie de la ventana.
+        self._confeti(*self._origen, 140, -90, 50, 380, 900)
+
+    def _armar_25(self):
+        rnd, w, h = self._rnd, self.width(), self.height()
+        self._confeti(*self._origen, 110, -90, 45, 400, 950, tamano=(1.2, 1.8))
+        # Ráfagas desde lugares, momentos y direcciones al azar, cada una con
+        # su cantidad y su fuerza: que no se lea como dos cañones prolijos.
+        for _ in range(10):
+            cuando = rnd.uniform(0.0, 1.4)
+            args = (rnd.uniform(0.03, 0.97) * w, rnd.uniform(0.6, 1.0) * h + 10,
+                    rnd.randint(50, 130), -90 + rnd.uniform(-40, 40),
+                    rnd.uniform(12, 50), rnd.uniform(350, 600), rnd.uniform(800, 1200))
+            self._agenda.append((cuando, lambda a=args: self._confeti(
+                *a, tamano=(1.1, 2.1), vida=(2.0, 3.2))))
+        # Y algo que llueve desde arriba, de a uno y a lo ancho.
+        for _ in range(90):
+            cuando = rnd.uniform(0.3, 1.8)
+            x = rnd.uniform(0.0, 1.0) * w
+            self._agenda.append((cuando, lambda x=x: self._confeti(
+                x, -10, 1, 90, 60, 20, 200, tamano=(1.1, 2.0), vida=(2.0, 2.6))))
+
+    def _armar_50(self):
+        rnd = self._rnd
+        self._confeti(*self._origen, 80, -90, 45, 350, 850, colores=self.DORADOS)
+        # Cohetes salteados durante casi tres segundos y un final de varios
+        # juntos.
+        tiempos = [rnd.uniform(0.0, 3.0) for _ in range(24)]
+        tiempos += [3.3 + rnd.uniform(0, 0.3) for _ in range(9)]
+        for cuando in tiempos:
+            self._agenda.append((cuando, self._lanzar_cohete))
+
+    def _lanzar_cohete(self):
+        rnd, w, h = self._rnd, self.width(), self.height()
+        altura = rnd.uniform(0.45, 0.85) * h      # cuánto sube desde el piso
+        g = 600
+        self._nuevas.append({
+            "tipo": "cohete", "x": rnd.uniform(0.1, 0.9) * w, "y": float(h),
+            "vx": rnd.uniform(-40, 40), "vy": -math.sqrt(2 * g * altura), "g": g,
+            "edad": 0.0, "vida": 4.0,
+        })
+
+    def _explotar(self, x, y):
+        rnd = self._rnd
+        paleta = rnd.choice(self.PALETAS_FUEGOS)
+        anillo = rnd.random() < 0.3
+        n = rnd.randint(100, 160)
+        vmax = rnd.uniform(230, 380)
+        # Fogonazo en el centro, apenas un instante.
+        self._nuevas.append({"tipo": "fogonazo", "x": x, "y": y, "r": vmax * 0.45,
+                             "vx": 0.0, "vy": 0.0, "edad": 0.0, "vida": 0.18})
+        for i in range(n):
+            a = i / n * math.tau + rnd.uniform(-0.05, 0.05)
+            # La raíz reparte las chispas parejo dentro del círculo; el anillo
+            # las deja todas en el borde.
+            v = vmax * (rnd.uniform(0.92, 1.0) if anillo else math.sqrt(rnd.random()))
+            self._nuevas.append({
+                "tipo": "chispa", "x": x, "y": y,
+                "vx": math.cos(a) * v, "vy": math.sin(a) * v,
+                "color": QColor(rnd.choice(paleta)),
+                "edad": 0.0, "vida": rnd.uniform(1.1, 1.9),
+                "titila": rnd.random() < 0.5,
+            })
+
+    def _armar_100(self):
+        # El diamante, los rayos y la marquesina se dibujan según el tiempo
+        # en paintEvent; acá van solo las partículas.
+        cx, cy = self._centro_diamante()
+        self._agenda.append((1.05, lambda: self._confeti(
+            cx, cy, 170, -90, 180, 250, 750, tamano=(1.0, 1.5), colores=self.HIELO)))
+        self._agenda.append((1.6, lambda: self._confeti(
+            *self._origen, 90, -90, 45, 400, 900, colores=self.HIELO)))
+
+    def _centro_diamante(self):
+        return self.width() / 2, self.height() / 2 - 10
+
+    # --- Movimiento ---
+
     def _avanzar(self):
         ahora = time.perf_counter()
         dt = min(ahora - self._ultimo, 0.05)
         self._ultimo = ahora
-        if ahora - self._inicio >= self.DURACION:
+        self._t = ahora - self._inicio
+        while self._agenda and self._agenda[0][0] <= self._t:
+            self._agenda.pop(0)[1]()
+        if self._t >= self._duracion and not self._agenda:
             self._timer.stop()
             self.parent().removeEventFilter(self)
             self.deleteLater()
             return
-        # Rozamiento del aire: frena rápido en horizontal y limita la caída.
-        freno = 0.985 ** (dt * 60)
-        for p in self._papelitos:
-            p["vx"] *= freno
-            p["vy"] = p["vy"] * freno + 1400 * dt      # gravedad
+
+        vivas = []
+        freno_papel = 0.985 ** (dt * 60)    # rozamiento del aire
+        freno_chispa = 0.955 ** (dt * 60)
+        for p in self._particulas:
+            p["edad"] += dt
+            if p["edad"] >= p["vida"]:
+                continue
+            tipo = p["tipo"]
+            if tipo == "papel":
+                p["vx"] *= freno_papel
+                p["vy"] = p["vy"] * freno_papel + self.GRAVEDAD * dt
+                p["giro"] += p["vgiro"] * dt
+                p["fase"] += 8 * dt
+            elif tipo == "chispa":
+                p["vx"] *= freno_chispa
+                p["vy"] = p["vy"] * freno_chispa + 140 * dt
+            elif tipo == "cohete":
+                p["vy"] += p["g"] * dt
+                if p["vy"] >= 0:          # llegó arriba: explota
+                    self._explotar(p["x"], p["y"])
+                    continue
             p["x"] += p["vx"] * dt
             p["y"] += p["vy"] * dt
-            p["giro"] += p["vgiro"] * dt
-            p["fase"] += 8 * dt
+            vivas.append(p)
+        self._particulas = vivas + self._nuevas
+        self._nuevas = []
         self.update()
 
+    # --- Dibujo ---
+
+    def _salida(self, desde, largo):
+        """1 hasta 'desde' segundos, y de ahí baja a 0 en 'largo' segundos."""
+        return max(0.0, min(1.0, 1 - (self._t - desde) / largo))
+
+    @staticmethod
+    def _rebote(t):
+        """De 0 a 1 pasándose un poco y volviendo (como un resorte)."""
+        t = max(0.0, min(1.0, t))
+        c = 1.7
+        return 1 + (c + 1) * (t - 1) ** 3 + c * (t - 1) ** 2
+
     def paintEvent(self, event):
-        transcurrido = time.perf_counter() - self._inicio
-        # Opaco al principio; se desvanece en el último tercio.
-        resto = 1 - transcurrido / self.DURACION
-        opacidad = max(0.0, min(1.0, resto * 3))
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setOpacity(opacidad)
-        for c in self._papelitos:
-            p.save()
-            p.translate(c["x"], c["y"])
-            p.rotate(c["giro"])
-            # Achatar un eje simula que el papelito da vueltas en el aire.
-            p.scale(1.0, abs(math.cos(c["fase"])) * 0.8 + 0.2)
-            p.setBrush(c["color"])
-            w, h = c["ancho"], c["alto"]
-            if c["redondo"]:
-                p.drawEllipse(QRectF(-h, -h, 2 * h, 2 * h))
+        if self._nivel == 100:
+            self._pintar_diamante(p)
+        for c in self._particulas:
+            # Cada partícula se desvanece en su último medio segundo.
+            p.setOpacity(max(0.0, min(1.0, (c["vida"] - c["edad"]) * 2)))
+            tipo = c["tipo"]
+            if tipo == "papel":
+                p.save()
+                p.translate(c["x"], c["y"])
+                p.rotate(c["giro"])
+                # Achatar un eje simula que el papelito da vueltas en el aire.
+                p.scale(1.0, abs(math.cos(c["fase"])) * 0.8 + 0.2)
+                p.setBrush(c["color"])
+                w, h = c["ancho"], c["alto"]
+                if c["redondo"]:
+                    p.drawEllipse(QRectF(-h, -h, 2 * h, 2 * h))
+                else:
+                    p.drawRect(QRectF(-w / 2, -h / 2, w, h))
+                p.restore()
+            elif tipo == "chispa":
+                if c["titila"] and c["edad"] > c["vida"] * 0.5:
+                    p.setOpacity(p.opacity() * (0.5 + 0.5 * math.sin(c["edad"] * 40)))
+                # Una estela corta en la dirección del movimiento.
+                p.setPen(QPen(c["color"], 2.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QLineF(c["x"] - c["vx"] * 0.05, c["y"] - c["vy"] * 0.05,
+                                  c["x"], c["y"]))
+                p.setPen(Qt.PenStyle.NoPen)
+            elif tipo == "fogonazo":
+                avance = c["edad"] / c["vida"]
+                p.setOpacity(1 - avance)
+                r = c["r"] * (0.5 + 0.5 * avance)
+                # Resplandor: blanco en el centro, transparente en el borde.
+                luz = QRadialGradient(QPointF(c["x"], c["y"]), r)
+                luz.setColorAt(0.0, QColor(255, 246, 221, 150))
+                luz.setColorAt(1.0, QColor(255, 246, 221, 0))
+                p.setBrush(QBrush(luz))
+                p.drawEllipse(QRectF(c["x"] - r, c["y"] - r, 2 * r, 2 * r))
+            elif tipo == "cohete":
+                p.setPen(QPen(QColor(255, 230, 170, 200), 2, Qt.PenStyle.SolidLine,
+                              Qt.PenCapStyle.RoundCap))
+                p.drawLine(QLineF(c["x"], c["y"], c["x"] - c["vx"] * 0.06,
+                                  c["y"] - c["vy"] * 0.06))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#FFF3C4"))
+                p.drawEllipse(QRectF(c["x"] - 2.5, c["y"] - 2.5, 5, 5))
+
+    def _pintar_diamante(self, p):
+        t, w, h = self._t, self.width(), self.height()
+        salida = self._salida(4.0, 0.9)
+        cx, cy = self._centro_diamante()
+
+        # Se oscurece la ventana para que resalte.
+        p.fillRect(self.rect(), QColor(0, 0, 0, int(150 * min(1.0, t / 0.4) * salida)))
+
+        # Rayos de luz girando detrás.
+        p.save()
+        p.translate(cx, cy)
+        p.rotate(t * 35)
+        p.setOpacity(0.09 * min(1.0, t / 0.6) * salida)
+        p.setBrush(QColor("#BFF6FF"))
+        largo = math.hypot(w, h)
+        for _ in range(12):
+            p.rotate(30)
+            p.drawPolygon(QPolygonF([QPointF(0, 0), QPointF(largo, -largo * 0.07),
+                                     QPointF(largo, largo * 0.07)]))
+        p.restore()
+
+        # Marquesina: lamparitas alrededor de la ventana, encendidas de a una
+        # cada tres y corriéndose.
+        paso = 30
+        corrimiento = int(t * 9)
+        p.setOpacity(salida * min(1.0, t / 0.3))
+        for i in range(int(2 * (w + h) // paso)):
+            d = i * paso
+            if d < w:
+                x, y = d, 8
+            elif d < w + h:
+                x, y = w - 8, d - w
+            elif d < 2 * w + h:
+                x, y = w - (d - w - h), h - 8
             else:
-                p.drawRect(QRectF(-w / 2, -h / 2, w, h))
+                x, y = 8, h - (d - 2 * w - h)
+            encendida = (i + corrimiento) % 3 == 0
+            p.setBrush(QColor("#FFE08A") if encendida else QColor("#5A4A20"))
+            p.drawEllipse(QRectF(x - 5, y - 5, 10, 10))
+
+        # El diamante entra girando, se pasa de tamaño y vuelve; después
+        # late apenas y cada tanto le cruza un destello.
+        if t > 0.35:
+            avance = (t - 0.35) / 0.7
+            escala = 1.6 * max(0.0, self._rebote(avance)) * (1 + 0.04 * math.sin(t * 4))
+            giro = -70 * (1 - min(1.0, avance))
+            destello = ((t - 1.2) % 1.6) / 0.6 if t > 1.2 else -1
+            p.setOpacity(salida)
+            self._dibujar_gema(p, cx, cy, escala, giro, destello)
+
+        # Estrellitas que titilan alrededor.
+        if t > 0.9:
+            for i in range(12):
+                an = i * 2.39 + t * 0.3
+                radio = 115 + (i * 37) % 45
+                brillo = (math.sin(t * 6 + i * 1.7) + 1) / 2
+                p.setOpacity(brillo * salida)
+                self._dibujar_estrella(p, cx + math.cos(an) * radio * 1.6,
+                                       cy + math.sin(an) * radio * 0.7, 4 + brillo * 8)
+
+        if t > 1.2:
+            p.setOpacity(min(1.0, (t - 1.2) / 0.4) * salida)
+            p.setPen(QColor("#F2FCFF"))
+            fuente = QFont(self.font())
+            fuente.setPixelSize(24)
+            fuente.setBold(True)
+            p.setFont(fuente)
+            p.drawText(QRectF(0, cy + 110, w, 40), Qt.AlignmentFlag.AlignCenter, "100 escaneos")
+            p.setPen(Qt.PenStyle.NoPen)
+        p.setOpacity(1.0)
+
+    @staticmethod
+    def _dibujar_estrella(p, x, y, r):
+        puntos = []
+        for i in range(8):
+            radio = r if i % 2 == 0 else r * 0.28
+            an = i * math.pi / 4
+            puntos.append(QPointF(x + math.cos(an) * radio, y + math.sin(an) * radio))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawPolygon(QPolygonF(puntos))
+
+    @staticmethod
+    def _dibujar_gema(p, cx, cy, escala, giro, destello):
+        """Diamante de frente: corona arriba, pabellón en punta abajo, en facetas."""
+        def poligono(*xy):
+            return QPolygonF([QPointF(xy[i], xy[i + 1]) for i in range(0, len(xy), 2)])
+
+        p.save()
+        p.translate(cx, cy)
+        p.rotate(giro)
+        p.scale(escala, escala)
+        contorno = poligono(-46, -14, -26, -36, 26, -36, 46, -14, 0, 48)
+        facetas = [
+            ("#CFF7FF", poligono(-26, -36, -8, -14, -46, -14)),
+            ("#E9FCFF", poligono(-26, -36, 26, -36, 8, -14, -8, -14)),
+            ("#B5F1FC", poligono(26, -36, 46, -14, 8, -14)),
+            ("#5CC9E0", poligono(-46, -14, -8, -14, 0, 48)),
+            ("#9BE8F7", poligono(-8, -14, 8, -14, 0, 48)),
+            ("#3FB0CC", poligono(8, -14, 46, -14, 0, 48)),
+        ]
+        for color, cara in facetas:
+            p.setBrush(QColor(color))
+            p.drawPolygon(cara)
+        if 0 <= destello <= 1:
+            p.save()
+            camino = QPainterPath()
+            camino.addPolygon(contorno)
+            p.setClipPath(camino)
+            sx = -80 + destello * 160
+            p.setBrush(QColor(255, 255, 255, 190))
+            p.drawPolygon(poligono(sx, -50, sx + 16, -50, sx - 14, 60, sx - 30, 60))
             p.restore()
+        p.setPen(QPen(QColor(255, 255, 255, 180), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPolygon(contorno)
+        p.restore()
 
 
 class ContadorEscaneos(QPushButton):
     """
-    Cuántas imágenes se escanearon desde el último canje. Al llegar a META se
-    habilita: un clic lo canjea (confeti) y vuelve a cero.
+    Cuántas imágenes se escanearon desde el último canje. Desde META se puede
+    canjear, y el festejo depende del escalón alcanzado: conviene aguantar sin
+    canjear para llegar al siguiente. Un canje lo vuelve a cero.
+
+    El color acompaña: apagado hasta 10 y de ahí, de a poco con cada escaneo,
+    bronce, plata (25), oro (50) y diamante (100), que además brilla.
     """
 
-    canjeado = pyqtSignal()
+    canjeado = pyqtSignal(int)      # el escalón canjeado
     META = 10
+    ESCALONES = (10, 25, 50, 100)
+    # (desde, hasta, (fondo, texto) al principio, (fondo, texto) al final).
+    TRAMOS = [
+        (10, 25, ("#CD7F32", "#2B1A08"), ("#C9CED6", "#2A2E35")),
+        (25, 50, ("#C9CED6", "#2A2E35"), ("#FFC83D", "#3A2A00")),
+        # El oro pasa por un champán claro antes del celeste: mezclados
+        # directo, a mitad de camino dan verde.
+        (50, 75, ("#FFC83D", "#3A2A00"), ("#F4EEDC", "#2E2A20")),
+        (75, 100, ("#F4EEDC", "#2E2A20"), ("#9FF0FF", "#0B3A48")),
+    ]
 
     def __init__(self, valor=0, parent=None):
         super().__init__(parent)
         self.setObjectName("contadorEscaneos")
         self.clicked.connect(self._canjear)
+        self._brillo = QTimer(self)
+        self._brillo.timeout.connect(self._pintar)
         self.set_valor(valor)
+
+    @staticmethod
+    def _mezcla(a, b, t):
+        a, b = QColor(a), QColor(b)
+        return QColor(round(a.red() + (b.red() - a.red()) * t),
+                      round(a.green() + (b.green() - a.green()) * t),
+                      round(a.blue() + (b.blue() - a.blue()) * t))
+
+    def colores(self):
+        """(fondo, texto) para el valor actual, o None si todavía está apagado."""
+        v = self.valor
+        if v < self.META:
+            return None
+        if v >= 100:
+            # Brillo de diamante: va y viene entre el celeste y casi blanco.
+            t = (math.sin(time.perf_counter() * 3) + 1) / 2
+            return self._mezcla("#9FF0FF", "#F2FCFF", t), QColor("#0B3A48")
+        for desde, hasta, (f0, t0), (f1, t1) in self.TRAMOS:
+            if v < hasta:
+                k = (v - desde) / (hasta - desde)
+                return self._mezcla(f0, f1, k), self._mezcla(t0, t1, k)
+
+    def escalon(self):
+        """El escalón más alto alcanzado, o None si todavía no llegó a META."""
+        alcanzados = [e for e in self.ESCALONES if self.valor >= e]
+        return alcanzados[-1] if alcanzados else None
 
     def set_valor(self, valor):
         self.valor = max(0, int(valor))
         self.setText(str(self.valor))
         listo = self.valor >= self.META
         self.setEnabled(listo)
-        self.setProperty("listo", listo)
         self.setCursor(Qt.CursorShape.PointingHandCursor if listo
                        else Qt.CursorShape.ArrowCursor)
         self.setToolTip("Canjear" if listo else
                         f"Imágenes escaneadas. Faltan {self.META - self.valor} para canjear.")
-        # La hoja de estilos no se entera sola de que cambió la propiedad.
-        self.style().unpolish(self)
-        self.style().polish(self)
+        if self.valor >= 100:
+            self._brillo.start(80)
+        else:
+            self._brillo.stop()
+        self._pintar()
+
+    def _pintar(self):
+        colores = self.colores()
+        if colores is None:
+            self.setStyleSheet("")     # el gris apagado de la hoja general
+            return
+        fondo, texto = colores
+        self.setStyleSheet(
+            f"#contadorEscaneos {{ background-color: {fondo.name()}; color: {texto.name()};"
+            f" border: 1px solid {fondo.lighter(115).name()}; font-weight: bold; }}"
+            f"#contadorEscaneos:hover {{ background-color: {fondo.lighter(110).name()}; }}"
+            f"#contadorEscaneos:pressed {{ background-color: {fondo.darker(115).name()}; }}"
+        )
 
     def sumar(self):
         self.set_valor(self.valor + 1)
 
     def _canjear(self):
-        if self.valor >= self.META:
-            self.canjeado.emit()
+        escalon = self.escalon()
+        if escalon is not None:
+            self.canjeado.emit(escalon)
+
+
+class Spinner(QWidget):
+    """Ruedita de espera: un arco que gira mientras algo está en curso."""
+
+    def __init__(self, lado=16, color="#569CD6", parent=None):
+        super().__init__(parent)
+        self.setFixedSize(lado, lado)
+        self._color = QColor(color)
+        self._angulo = 0
+        self._anim = QVariantAnimation(self)
+        self._anim.setStartValue(0)
+        self._anim.setEndValue(360)
+        self._anim.setDuration(900)
+        self._anim.setLoopCount(-1)
+        self._anim.valueChanged.connect(self._girar)
+        self.hide()
+
+    def _girar(self, angulo):
+        self._angulo = angulo
+        self.update()
+
+    def start(self):
+        self.show()
+        # Como la barra de espera: con las animaciones de Windows apagadas,
+        # queda quieta.
+        if (QApplication.isEffectEnabled(Qt.UIEffect.UI_AnimateCombo)
+                and self._anim.state() != QVariantAnimation.State.Running):
+            self._anim.start()
+
+    def stop(self):
+        self._anim.stop()
+        self.hide()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        grosor = max(2.0, self.width() / 8)
+        caja = QRectF(self.rect()).adjusted(grosor, grosor, -grosor, -grosor)
+        pista = QColor(self._color)
+        pista.setAlpha(50)
+        p.setPen(QPen(pista, grosor))
+        p.drawEllipse(caja)
+        p.setPen(QPen(self._color, grosor, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        # drawArc mide en dieciseisavos de grado, en sentido antihorario.
+        p.drawArc(caja, int(-self._angulo * 16), 100 * 16)
 
 
 class FlatComboBox(QComboBox):
@@ -1569,6 +1997,10 @@ def _fmt_mb(mb):
     return (f"{mb:.0f} MB" if mb >= 10 else f"{mb:.1f} MB").replace(".", ",")
 
 
+def _porcentaje(hecho, total):
+    return int(100 * hecho / total) if total else 0
+
+
 class ElidedLabel(QLabel):
     """
     Etiqueta de una linea que recorta el texto con "…" cuando no entra, en vez
@@ -1601,6 +2033,7 @@ class ScannerApp(QMainWindow):
     # (resultado, error), uno de los dos en None.
     _act_buscada = pyqtSignal(object, object)
     _act_copiada = pyqtSignal(object, object)
+    _act_avance = pyqtSignal(object, object)    # (bytes copiados, total)
 
     def __init__(self):
         super().__init__()
@@ -1615,12 +2048,15 @@ class ScannerApp(QMainWindow):
         # PC que tenga la carpeta compartida en otra letra de unidad.
         self.update_dir = cfg.get("update_dir") or actualizador.CARPETA_ACTUALIZACIONES
         self.act = None               # última búsqueda: (estado, versión, ruta o detalle)
-        self._act_ocupado = None      # "buscando", "copiando" o None
+        self._act_ocupado = None      # "buscando", "copiando", "instalando" o None
+        self._act_copiado = None      # (bytes copiados, total) mientras se copia
         self._act_error = None        # por qué falló el último intento de actualizar
         self._act_impedimento = None  # por qué este ejecutable no se puede actualizar solo
         self.dlg_acerca = None
         self._act_buscada.connect(self.on_update_checked)
         self._act_copiada.connect(self.on_update_copied)
+        self._act_avance.connect(self.on_update_progress)
+        self._accion_estado = None    # qué hace un clic en el aviso del pie
 
         # Si el destino no está disponible (unidad de red caída, por ejemplo)
         # se usa una carpeta local, pero NO se persiste: si se guardara, una
@@ -1868,6 +2304,7 @@ class ScannerApp(QMainWindow):
         self.lbl_status_icon = QLabel()
         self.lbl_status = ElidedLabel()
         self.lbl_status.setObjectName("statusLine")
+        self.lbl_status.clicked.connect(self._clic_en_aviso)
 
         pie_layout.addWidget(lbl_calidad)
         pie_layout.addWidget(self.slider_dpi)
@@ -1971,10 +2408,19 @@ class ScannerApp(QMainWindow):
     def estado_actualizacion(self):
         """(texto, hay algo en curso, se puede actualizar ya) para el diálogo de versión."""
         if self._act_ocupado == "copiando":
-            return (f"Copiando la versión {self.act[1]}… El programa se cierra y "
-                    f"vuelve a abrir solo.", True, False)
+            texto = (f"Paso 1 de 3: copiando la versión {self.act[1]} desde la "
+                     f"carpeta compartida…")
+            if self._act_copiado:
+                hecho, total = self._act_copiado
+                mb = 1024 * 1024
+                texto += (f" {hecho / mb:.0f} de {total / mb:.0f} MB "
+                          f"({_porcentaje(hecho, total)}%).")
+            return texto, True, False
+        if self._act_ocupado == "instalando":
+            return ("Paso 2 de 3: abriendo el instalador. El programa se cierra, "
+                    "se reemplaza y vuelve a abrir solo.", True, False)
         if self._act_ocupado == "buscando":
-            return "Buscando actualizaciones…", True, False
+            return "Buscando actualizaciones en la carpeta compartida…", True, False
         if self.act is None:
             return "", False, False
         estado, version, detalle = self.act
@@ -2033,13 +2479,33 @@ class ScannerApp(QMainWindow):
             self._refrescar_acerca()
             return
         self._act_ocupado = "copiando"
+        self._act_copiado = None
         self._act_error = None
         # Que no arranque un escaneo: el programa está por cerrarse.
         self.btn_scan.setEnabled(False)
         self.btn_manual.setEnabled(False)
+        self.btn_update.setText(" Actualizando…")
         self._refrescar_acerca()
         origen = self.act[2]
-        self._en_segundo_plano(lambda: actualizador.preparar(origen), self._act_copiada)
+
+        def avance(hecho, total):
+            try:
+                self._act_avance.emit(hecho, total)
+            except RuntimeError:
+                pass    # la ventana ya no existe
+
+        self._en_segundo_plano(lambda: actualizador.preparar(origen, avance),
+                               self._act_copiada)
+
+    @pyqtSlot(object, object)
+    def on_update_progress(self, hecho, total):
+        anterior = self._act_copiado
+        self._act_copiado = (hecho, total)
+        # Se avisa por cada mega copiado; alcanza con redibujar cuando cambia
+        # el porcentaje.
+        if anterior is None or _porcentaje(*anterior) != _porcentaje(hecho, total):
+            self.btn_update.setText(f" Actualizando… {_porcentaje(hecho, total)}%")
+            self._refrescar_acerca()
 
     @pyqtSlot(object, object)
     def on_update_copied(self, nuevo, error):
@@ -2053,12 +2519,16 @@ class ScannerApp(QMainWindow):
             self._act_error = str(error)
             self.btn_scan.setEnabled(True)
             self.btn_manual.setEnabled(True)
+            self.btn_update.setText(f" Actualizar a {self.act[1]}")
             self.log_to_console(f"Error al actualizar: {error}")
             self._refrescar_acerca()
             return
         # El ejecutable nuevo ya arrancó y espera a que este cierre para
-        # reemplazarlo.
-        QApplication.quit()
+        # reemplazarlo. Un instante con el paso 2 a la vista, para que se
+        # entienda por qué se cierra la ventana.
+        self._act_ocupado = "instalando"
+        self._refrescar_acerca()
+        QTimer.singleShot(1200, QApplication.quit)
 
     def get_next_filename(self):
         # Auto-increment rellenando huecos: un solo listdir en vez de un
@@ -2107,21 +2577,32 @@ class ScannerApp(QMainWindow):
         """Aviso o error en pocas palabras, al pie. El texto completo queda en el registro."""
         self._show_status("alerta", color, _aviso_corto(message), message)
 
-    def show_notice(self, message):
-        """Una buena noticia al pie, hasta el próximo escaneo."""
-        self._show_status("tilde", "#6FCF73", message, message)
+    def show_notice(self, message, accion=None, ayuda=None):
+        """
+        Una buena noticia al pie, hasta el próximo escaneo. Con `accion`, un
+        clic en el aviso la ejecuta y `ayuda` explica qué hace.
+        """
+        self._show_status("tilde", "#6FCF73", message, ayuda or message, accion)
 
-    def _show_status(self, icono, color, corto, completo):
+    def _show_status(self, icono, color, corto, completo, accion=None):
         self.lbl_status_icon.setPixmap(icon_pixmap(icono, color, 14))
         self.lbl_status.setStyleSheet(f"color: {color};")
         self.lbl_status.setText(corto)
         self.lbl_status.setToolTip(completo)
         self.lbl_status_icon.setVisible(True)
         self.lbl_status.setVisible(True)
+        self._accion_estado = accion
+        self.lbl_status.setCursor(Qt.CursorShape.PointingHandCursor if accion
+                                  else Qt.CursorShape.ArrowCursor)
 
     def clear_warning(self):
         self.lbl_status_icon.setVisible(False)
         self.lbl_status.setVisible(False)
+        self._accion_estado = None
+
+    def _clic_en_aviso(self):
+        if self._accion_estado is not None:
+            self._accion_estado()
 
     @pyqtSlot(str)
     def log_to_console(self, message):
@@ -2212,10 +2693,10 @@ class ScannerApp(QMainWindow):
         self.contador.sumar()
         self._guardar_contador()
 
-    def canjear_contador(self):
+    def canjear_contador(self, escalon):
         centro = self.contador.rect().center()
-        ConfettiOverlay(self.centralWidget(),
-                        self.contador.mapTo(self.centralWidget(), centro))
+        Festejo(self.centralWidget(),
+                self.contador.mapTo(self.centralWidget(), centro), escalon)
         self.contador.set_valor(0)
         self._guardar_contador()
 
@@ -2601,8 +3082,8 @@ class ScannerApp(QMainWindow):
         #linkButton:hover {
             color: #8CC4F2;
         }
-        /* Contador de escaneos, al lado de Registro. Apagado hasta llegar a
-           la meta; ahí se enciende y se puede canjear. */
+        /* Contador de escaneos, al lado de Registro. Este es el gris de
+           apagado; los colores de cada escalón los pone ContadorEscaneos. */
         #contadorEscaneos {
             background-color: #2A2A2A;
             color: #8A8A8A;
@@ -2611,18 +3092,6 @@ class ScannerApp(QMainWindow):
             min-width: 22px;
             padding: 1px 6px;
             font-size: 12px;
-        }
-        #contadorEscaneos[listo="true"] {
-            background-color: #D84315;
-            color: white;
-            border: 1px solid #E5501F;
-            font-weight: bold;
-        }
-        #contadorEscaneos[listo="true"]:hover {
-            background-color: #E5501F;
-        }
-        #contadorEscaneos[listo="true"]:pressed {
-            background-color: #B5380F;
         }
         #mutedLabel {
             color: #9A9A9A;
@@ -2734,6 +3203,14 @@ class ScannerApp(QMainWindow):
             background-color: #2E7D32; /* Verde oscuro */
             border: 1px solid #4CAF50; /* Verde brillante */
         }
+        #novedades {
+            background-color: #181818;
+            color: #CCCCCC;
+            border: 1px solid #2D2D30;
+            border-radius: 6px;
+            padding: 4px 6px;
+            font-size: 12px;
+        }
         #consoleOutput {
             background-color: #181818;
             color: #CCCCCC;
@@ -2752,24 +3229,49 @@ def run_instalar(app, destino):
     actualizador.py): un cartel mientras reemplaza al instalado, y después lo
     abre. Si no pudo reemplazarlo, avisa y abre el que estaba.
     """
-    cartel = QLabel("Actualizando La bestia…\nEl programa se abre solo en unos segundos.")
+    cartel = QFrame()
+    cartel.setObjectName("cartel")
     cartel.setWindowFlags(Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint)
-    cartel.setAlignment(Qt.AlignmentFlag.AlignCenter)
     cartel.setStyleSheet(
-        "background-color: #1E1E1E; color: #D4D4D4; font-size: 14px; "
-        "padding: 28px 44px; border: 1px solid #454545;"
+        "#cartel { background-color: #1E1E1E; border: 1px solid #454545; }"
+        "QLabel { color: #D4D4D4; background: transparent; }"
+        "#cartelTitulo { color: #FFFFFF; font-size: 15px; font-weight: bold; }"
+        "#cartelEtapa { color: #9A9A9A; font-size: 12px; }"
     )
+    titulo = QLabel(f"Actualizando La bestia a la versión {actualizador.VERSION}")
+    titulo.setObjectName("cartelTitulo")
+    etapa = QLabel("Paso 3 de 3: reemplazando el programa…")
+    etapa.setObjectName("cartelEtapa")
+    spinner = Spinner(22)
+    textos = QVBoxLayout()
+    textos.setSpacing(4)
+    textos.addWidget(titulo)
+    textos.addWidget(etapa)
+    fila = QHBoxLayout(cartel)
+    fila.setContentsMargins(28, 22, 36, 22)
+    fila.setSpacing(16)
+    fila.addWidget(spinner, alignment=Qt.AlignmentFlag.AlignVCenter)
+    fila.addLayout(textos)
+    cartel.setMinimumWidth(460)
     cartel.show()
+    spinner.start()
 
+    ETAPAS = {
+        "copiando": "Paso 3 de 3: reemplazando el programa…",
+        "esperando": "Paso 3 de 3: esperando a que termine de cerrarse la versión anterior…",
+    }
     resultado = []
+    avisos = []     # etapas que informa el hilo; las muestra el reloj
 
     def trabajo():
         try:
-            resultado.append(actualizador.instalar(destino))
+            resultado.append(actualizador.instalar(destino, aviso=avisos.append))
         except Exception as e:
             resultado.append(e)
 
     def revisar():
+        if avisos:
+            etapa.setText(ETAPAS.get(avisos[-1], etapa.text()))
         if not resultado:
             return
         reloj.stop()
@@ -2782,6 +3284,7 @@ def run_instalar(app, destino):
                 "sesión de esta PC.\n\nSe abre la versión que ya estaba instalada."
             )
         if error is None:
+            etapa.setText("Listo. Abriendo el programa…")
             # Con este aviso el programa dice, al abrir, que quedó actualizado.
             actualizador.abrir(destino, "--actualizado")
         else:
@@ -2812,7 +3315,9 @@ if __name__ == '__main__':
         window.log_to_console(f"Programa actualizado a la versión {actualizador.VERSION}.")
         # Si hay un aviso al pie (destino no disponible), ese importa más.
         if not window.lbl_status.isVisible():
-            window.show_notice(f"Actualizado a la versión {actualizador.VERSION}")
+            window.show_notice(f"Actualizado a la versión {actualizador.VERSION} · ver novedades",
+                               accion=window.open_about,
+                               ayuda="Clic para ver qué cambió en esta versión")
     window.check_updates()
     app.aboutToQuit.connect(lambda: _limpiar_crudos_pendientes())
     sys.exit(app.exec())
