@@ -40,7 +40,7 @@ VERSION = "1.5.0"
 NOVEDADES = [
     ("1.5.0", [
         "El contador cambia de color con cada escaneo: bronce, plata, oro y diamante.",
-        "Un festejo distinto al canjear a los 10, 25, 50 y 100 escaneos.",
+        "Nuevos festejos a medida que se juntan más registros.",
         "La actualización muestra en qué paso va y cuánto lleva copiado.",
         "Las novedades de cada versión, acá.",
     ]),
