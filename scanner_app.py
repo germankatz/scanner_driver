@@ -130,7 +130,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, pyqtSlot, QEvent, QSize, QRectF, QLineF,
-    QByteArray, QVariantAnimation, QTimer, QPointF
+    QByteArray, QVariantAnimation, QTimer, QPointF, QPoint, QRect
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPixmap, QImage, QKeySequence, QShortcut, QPainter, QBrush, QIcon,
@@ -1429,8 +1429,9 @@ class Festejo(QWidget):
     """
     Festejo del canje del contador, dibujado con QPainter sobre una capa
     transparente que cubre la ventana y no toma clics. Cambia según el
-    escalón canjeado: confeti (10), confeti grande y desparramado (25), fuegos
-    artificiales (50) y un diamante con rayos y marquesina de casino (100).
+    escalón canjeado: un fueguito que quema el número (antes de 10), confeti
+    (10), confeti grande y desparramado (25), fuegos artificiales (50) y un
+    diamante con rayos y marquesina de casino (100).
     Se destruye sola al terminar. Las bibliotecas de confeti para la web
     necesitarían un navegador embebido (QtWebEngine, más de 100 MB): así no
     agrega nada al ejecutable.
@@ -1444,11 +1445,29 @@ class Festejo(QWidget):
         ["#FFC83D", "#FFE08A"], ["#FFFFFF", "#CFF7FF"], ["#FF6B4A", "#FFC83D"],
         ["#6FCF73", "#E9FFD9"], ["#569CD6", "#BFE3FF"], ["#C586C0", "#FFD6F6"],
     ]
-    DURACIONES = {10: 3.0, 25: 4.2, 50: 5.6, 100: 5.0}
+    DURACIONES = {0: 2.0, 10: 3.0, 25: 4.2, 50: 5.6, 100: 5.0}
+    QUEMADO = 0.75     # segundo del fueguito en que el número ya no se ve
+    # Llama plana en tres capas, de afuera hacia adentro (viewBox de 64x80,
+    # con la base abajo). Cada capa titila por su cuenta.
+    LLAMA_SVG = [
+        ("#F4511E", "M32 2C38 18 54 26 54 48C54 66 44 78 32 78C20 78 10 66 10 50"
+                    "C10 38 16 30 22 24C22 34 26 38 30 40C28 26 30 12 32 2Z"),
+        ("#FF9800", "M33 26C37 36 46 42 46 55C46 67 40 74 32 74C24 74 18 67 18 57"
+                    "C18 50 22 45 26 42C26 49 28 52 31 53C30 44 31 34 33 26Z"),
+        ("#FFE082", "M32 46C35 53 40 57 40 63C40 69 36 73 32 73C28 73 24 69 24 64"
+                    "C24 59 28 55 32 46Z"),
+    ]
+    # (corrimiento en anchos del contador, tamaño, demora, fase): las de los
+    # costados primero, así la del centro queda adelante.
+    LLAMAS = [(-0.32, 0.68, 0.07, 1.7), (0.32, 0.72, 0.13, 3.1), (0.0, 1.0, 0.0, 0.0)]
     CUADRO_MS = 16     # unos 60 cuadros por segundo
     GRAVEDAD = 1400    # píxeles por segundo al cuadrado, para el confeti
 
-    def __init__(self, parent, origen, nivel):
+    def __init__(self, parent, origen, nivel, zona=None, al_quemar=None):
+        """
+        `zona` es el rectángulo del contador y `al_quemar` lo que se llama
+        cuando el fuego tapa el número: solo para el fueguito (nivel 0).
+        """
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
@@ -1462,7 +1481,15 @@ class Festejo(QWidget):
         self._nuevas = []       # lo que aparece durante un cuadro (chispas, tandas)
         self._agenda = []       # (segundo, función): lo que se larga más tarde
         self._t = 0.0
-        {10: self._armar_10, 25: self._armar_25,
+        self._zona = QRectF(zona) if zona is not None else None
+        self._al_quemar = al_quemar
+        self._capas_llama = []
+        if nivel == 0:
+            for color, camino in self.LLAMA_SVG:
+                svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 80">'
+                       f'<path fill="{color}" d="{camino}"/></svg>')
+                self._capas_llama.append(QSvgRenderer(QByteArray(svg.encode("utf-8"))))
+        {0: self._armar_0, 10: self._armar_10, 25: self._armar_25,
          50: self._armar_50, 100: self._armar_100}[nivel]()
         self._agenda.sort(key=lambda e: e[0])
         self._particulas, self._nuevas = self._nuevas, []
@@ -1502,6 +1529,25 @@ class Festejo(QWidget):
                 "color": QColor(rnd.choice(colores)),
                 "edad": 0.0, "vida": rnd.uniform(*vida),
             })
+
+    def _armar_0(self):
+        # Las llamas (dibujadas según el tiempo en _pintar_llamas) van
+        # carbonizando el número; cuando ya no se ve, abajo queda el cero, y
+        # al apagarse sube un poco de humo.
+        for _ in range(8):
+            self._agenda.append((self._rnd.uniform(0.95, 1.4), self._humo))
+        if self._al_quemar is not None:
+            self._agenda.append((self.QUEMADO, self._al_quemar))
+
+    def _humo(self):
+        rnd, z = self._rnd, self._zona
+        self._nuevas.append({
+            "tipo": "humo",
+            "x": z.center().x() + rnd.uniform(-0.3, 0.3) * z.width(), "y": z.top(),
+            "vx": rnd.uniform(-14, 6), "vy": rnd.uniform(-45, -25), "empuje": 15,
+            "radio": rnd.uniform(4, 7) * z.height() / 20,
+            "edad": 0.0, "vida": rnd.uniform(0.9, 1.4),
+        })
 
     def _armar_10(self):
         # Abanico hacia arriba: el contador está al pie de la ventana.
@@ -1611,6 +1657,8 @@ class Festejo(QWidget):
             elif tipo == "chispa":
                 p["vx"] *= freno_chispa
                 p["vy"] = p["vy"] * freno_chispa + 140 * dt
+            elif tipo == "humo":
+                p["vy"] -= p["empuje"] * dt   # sube cada vez un poco más rápido
             elif tipo == "cohete":
                 p["vy"] += p["g"] * dt
                 if p["vy"] >= 0:          # llegó arriba: explota
@@ -1642,6 +1690,9 @@ class Festejo(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         if self._nivel == 100:
             self._pintar_diamante(p)
+        if self._nivel == 0:
+            self._pintar_carbon(p)
+            self._pintar_llamas(p)
         for c in self._particulas:
             # Cada partícula se desvanece en su último medio segundo.
             p.setOpacity(max(0.0, min(1.0, (c["vida"] - c["edad"]) * 2)))
@@ -1677,6 +1728,12 @@ class Festejo(QWidget):
                 luz.setColorAt(1.0, QColor(255, 246, 221, 0))
                 p.setBrush(QBrush(luz))
                 p.drawEllipse(QRectF(c["x"] - r, c["y"] - r, 2 * r, 2 * r))
+            elif tipo == "humo":
+                avance = c["edad"] / c["vida"]
+                r = c["radio"] * (1 + 1.6 * avance)
+                p.setOpacity(0.35 * (1 - avance) * min(1.0, c["edad"] / 0.2))
+                p.setBrush(QColor("#6A6A6A"))
+                p.drawEllipse(QRectF(c["x"] - r, c["y"] - r, 2 * r, 2 * r))
             elif tipo == "cohete":
                 p.setPen(QPen(QColor(255, 230, 170, 200), 2, Qt.PenStyle.SolidLine,
                               Qt.PenCapStyle.RoundCap))
@@ -1685,6 +1742,59 @@ class Festejo(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor("#FFF3C4"))
                 p.drawEllipse(QRectF(c["x"] - 2.5, c["y"] - 2.5, 5, 5))
+
+    def _pintar_carbon(self, p):
+        """El número carbonizándose: se oscurece, lo tapa, y al apagarse aparece el cero."""
+        t = self._t
+        if t < 0.15:
+            return
+        if t < 0.55:
+            tapado = (t - 0.15) / 0.4
+        elif t < 0.85:
+            tapado = 1.0
+        else:
+            tapado = max(0.0, 1 - (t - 0.85) / 0.5)
+        if tapado <= 0:
+            return
+        z = self._zona.adjusted(-1, -1, 1, 1)
+        radio = z.height() / 2
+        p.setOpacity(tapado)
+        p.setBrush(QColor(30, 18, 12))
+        p.setPen(QPen(QColor(255, 120, 40, 170), 1.5))    # borde todavía encendido
+        p.drawRoundedRect(z, radio, radio)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setOpacity(1.0)
+
+    def _pintar_llamas(self, p):
+        """Llamas que crecen con un rebote, se balancean y titilan, y se achican al apagarse."""
+        z = self._zona
+        alto_base = z.height() * 2.4
+        p.setOpacity(1.0)
+        for corrimiento, tamano, demora, fase in self.LLAMAS:
+            t = self._t - demora
+            if t <= 0:
+                continue
+            if t < 1.0:
+                crece = max(0.0, self._rebote(t / 0.3))
+            else:
+                crece = max(0.0, 1 - (t - 1.0) / 0.35)
+            if crece <= 0:
+                continue
+            alto = alto_base * tamano * crece
+            ancho = alto * 0.8
+            # La base, un poco debajo del centro del contador.
+            bx = z.center().x() + corrimiento * z.width()
+            by = z.center().y() + z.height() * 0.3
+            for i, capa in enumerate(self._capas_llama):
+                f = fase + i * 1.3
+                p.save()
+                p.translate(bx, by)
+                # Inclinar la punta de un lado al otro, como si la moviera el aire.
+                p.shear(0.10 * math.sin(t * 8 + f), 0)
+                p.scale(1 + 0.05 * math.sin(t * 23 + f),
+                        1 + (0.07 + 0.03 * i) * math.sin(t * 17 + f))
+                capa.render(p, QRectF(-ancho / 2, -alto, ancho, alto))
+                p.restore()
 
     def _pintar_diamante(self, p):
         t, w, h = self._t, self.width(), self.height()
@@ -1806,15 +1916,16 @@ class Festejo(QWidget):
 
 class ContadorEscaneos(QPushButton):
     """
-    Cuántas imágenes se escanearon desde el último canje. Desde META se puede
-    canjear, y el festejo depende del escalón alcanzado: conviene aguantar sin
+    Cuántas imágenes se escanearon desde el último canje. Se puede canjear en
+    cualquier momento y el festejo depende del escalón alcanzado: antes de
+    META, apenas un fueguito que quema el número. Conviene aguantar sin
     canjear para llegar al siguiente. Un canje lo vuelve a cero.
 
     El color acompaña: apagado hasta 10 y de ahí, de a poco con cada escaneo,
     bronce, plata (25), oro (50) y diamante (100), que además brilla.
     """
 
-    canjeado = pyqtSignal(int)      # el escalón canjeado
+    canjeado = pyqtSignal(int)      # el escalón canjeado; 0 antes de META
     META = 10
     ESCALONES = (10, 25, 50, 100)
     # (desde, hasta, (fondo, texto) al principio, (fondo, texto) al final).
@@ -1857,19 +1968,20 @@ class ContadorEscaneos(QPushButton):
                 return self._mezcla(f0, f1, k), self._mezcla(t0, t1, k)
 
     def escalon(self):
-        """El escalón más alto alcanzado, o None si todavía no llegó a META."""
+        """El escalón más alto alcanzado: 0 antes de META, None si está en cero."""
+        if self.valor == 0:
+            return None
         alcanzados = [e for e in self.ESCALONES if self.valor >= e]
-        return alcanzados[-1] if alcanzados else None
+        return alcanzados[-1] if alcanzados else 0
 
     def set_valor(self, valor):
         self.valor = max(0, int(valor))
         self.setText(str(self.valor))
-        listo = self.valor >= self.META
+        listo = self.valor > 0
         self.setEnabled(listo)
         self.setCursor(Qt.CursorShape.PointingHandCursor if listo
                        else Qt.CursorShape.ArrowCursor)
-        self.setToolTip("Canjear" if listo else
-                        f"Imágenes escaneadas. Faltan {self.META - self.valor} para canjear.")
+        self.setToolTip("Canjear" if listo else "Imágenes escaneadas")
         if self.valor >= 100:
             self._brillo.start(80)
         else:
@@ -2694,9 +2806,23 @@ class ScannerApp(QMainWindow):
         self._guardar_contador()
 
     def canjear_contador(self, escalon):
-        centro = self.contador.rect().center()
-        Festejo(self.centralWidget(),
-                self.contador.mapTo(self.centralWidget(), centro), escalon)
+        base = self.centralWidget()
+        origen = self.contador.mapTo(base, self.contador.rect().center())
+        if escalon == 0:
+            # El número se va cuando el fuego ya lo tapó. Se descuenta lo
+            # quemado y no se pone en cero: si mientras tanto terminó un
+            # escaneo, ese no se pierde.
+            quemado = self.contador.valor
+            self.contador.setEnabled(False)     # que no se prenda dos veces
+
+            def al_quemar():
+                self.contador.set_valor(self.contador.valor - quemado)
+                self._guardar_contador()
+
+            zona = QRect(self.contador.mapTo(base, QPoint(0, 0)), self.contador.size())
+            Festejo(base, origen, 0, zona=zona, al_quemar=al_quemar)
+            return
+        Festejo(base, origen, escalon)
         self.contador.set_valor(0)
         self._guardar_contador()
 
@@ -3092,6 +3218,11 @@ class ScannerApp(QMainWindow):
             min-width: 22px;
             padding: 1px 6px;
             font-size: 12px;
+        }
+        #contadorEscaneos:enabled:hover {
+            background-color: #353535;
+            color: #CCCCCC;
+            border: 1px solid #4A4A4A;
         }
         #mutedLabel {
             color: #9A9A9A;
