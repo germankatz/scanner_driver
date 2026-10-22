@@ -1064,43 +1064,68 @@ def save_config(**cambios):
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, current_dir="", current_prefix=""):
         super().__init__(parent)
-        self.setWindowTitle("Configurar Destino")
-        self.setFixedSize(400, 200)
+        self.setWindowTitle("Cambiar destino")
+        self.setFixedSize(480, 250)
         self.setStyleSheet(parent.styleSheet())
-        
+
         layout = QVBoxLayout(self)
-        
-        # Directorio
-        layout.addWidget(QLabel("Carpeta de destino:"))
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(4)
+        titulo = QLabel("Destino de los escaneos")
+        titulo.setObjectName("acercaTitulo")
+        layout.addWidget(titulo)
+        layout.addSpacing(14)
+
+        # Carpeta
+        lbl_dir = QLabel("Carpeta")
+        lbl_dir.setObjectName("mutedLabel")
+        layout.addWidget(lbl_dir)
         dir_layout = QHBoxLayout()
-        self.txt_dir = QLineEdit(current_dir)
-        btn_browse = QPushButton("...")
-        btn_browse.setFixedWidth(40)
+        dir_layout.setSpacing(8)
+        self.txt_dir = QLineEdit(os.path.normpath(current_dir) if current_dir else "")
+        btn_browse = QPushButton(" Elegir…")
+        btn_browse.setIcon(icon("carpeta", "#CCCCCC"))
+        btn_browse.setIconSize(QSize(16, 16))
+        btn_browse.setObjectName("secondaryButton")
+        btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse.clicked.connect(self.browse_dir)
-        dir_layout.addWidget(self.txt_dir)
+        dir_layout.addWidget(self.txt_dir, stretch=1)
         dir_layout.addWidget(btn_browse)
         layout.addLayout(dir_layout)
-        
+        layout.addSpacing(10)
+
         # Prefijo
-        layout.addWidget(QLabel("Prefijo del nombre de archivo:"))
+        lbl_prefix = QLabel("Prefijo del nombre de archivo")
+        lbl_prefix.setObjectName("mutedLabel")
+        layout.addWidget(lbl_prefix)
         self.txt_prefix = QLineEdit(current_prefix)
         layout.addWidget(self.txt_prefix)
-        
-        layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
-        
-        # Botones
-        btn_layout = QHBoxLayout()
-        btn_ok = QPushButton("Guardar Configuración")
-        btn_ok.setObjectName("primaryButton")
+
+        layout.addStretch()
+
+        # Botones, con el mismo par que "Acerca de": secundario y azul.
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.setObjectName("secondaryButton")
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.clicked.connect(self.reject)
+        btn_ok = QPushButton(" Guardar")
+        btn_ok.setIcon(icon("tilde", "#FFFFFF"))
+        btn_ok.setIconSize(QSize(16, 16))
+        btn_ok.setObjectName("updateButton")
+        btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_ok.setDefault(True)
         btn_ok.clicked.connect(self.accept)
+        btn_layout = QHBoxLayout()
         btn_layout.addStretch()
+        btn_layout.addWidget(btn_cancel)
         btn_layout.addWidget(btn_ok)
         layout.addLayout(btn_layout)
-        
+
     def browse_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "Seleccionar Carpeta")
+        # Arranca en la carpeta que ya está escrita, no en la de trabajo.
+        d = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta", self.txt_dir.text())
         if d:
-            self.txt_dir.setText(d)
+            self.txt_dir.setText(os.path.normpath(d))
 
 
 class AcercaDialog(QDialog):
@@ -2276,7 +2301,8 @@ class ScannerApp(QMainWindow):
         main_layout.addLayout(top_layout)
 
         # Destino: la carpeta a la vista y, al lado, el acceso para cambiarla.
-        # Un clic en cualquiera de los dos abre la configuración.
+        # Un clic en la carpeta la abre en el Explorador; el botón, la
+        # configuración.
         destino_layout = QHBoxLayout()
         destino_layout.setSpacing(8)
         lbl_carpeta = QLabel()
@@ -2284,8 +2310,8 @@ class ScannerApp(QMainWindow):
         self.lbl_destino = ElidedLabel(mode=Qt.TextElideMode.ElideMiddle)
         self.lbl_destino.setObjectName("destinoPath")
         self.lbl_destino.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lbl_destino.setToolTip("Carpeta donde se guardan los escaneos. Clic para cambiarla.")
-        self.lbl_destino.clicked.connect(self.open_settings)
+        self.lbl_destino.setToolTip("Carpeta donde se guardan los escaneos. Clic para abrirla.")
+        self.lbl_destino.clicked.connect(self.abrir_destino)
         btn_destino = QPushButton("Cambiar destino")
         btn_destino.setObjectName("linkButton")
         btn_destino.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2468,6 +2494,17 @@ class ScannerApp(QMainWindow):
             pythoncom.CoUninitialize()
         except Exception:
             pass
+
+    def abrir_destino(self):
+        """Abre la carpeta de destino en el Explorador de Windows."""
+        if not os.path.isdir(self.output_dir):
+            self.log_to_console(f"AVISO: la carpeta {self.output_dir} no está disponible.")
+            self.open_settings()
+            return
+        try:
+            os.startfile(os.path.normpath(self.output_dir))
+        except OSError as e:
+            self.log_to_console(f"AVISO: no se pudo abrir la carpeta ({e}).")
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.output_dir, self.file_prefix)
