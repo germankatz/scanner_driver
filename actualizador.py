@@ -32,12 +32,16 @@ import time
 
 # La versión del programa. El tag del release tiene que ser "v" + esto: CI lo
 # verifica, y también que el ejecutable la lleve en su recurso de versión.
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 # Qué cambió en cada versión, la más nueva primero. Se muestra en "Acerca de",
 # en palabras de quien usa el programa. CI no deja publicar una versión que no
 # tenga su entrada acá.
 NOVEDADES = [
+    ("1.6.1", [
+        "Un clic en la carpeta de destino la abre en el Explorador.",
+        "La ventana para cambiar el destino tiene un diseño nuevo.",
+    ]),
     ("1.6.0", [
         "Ahora se puede reiniciar el contador en cualquier momento.",
     ]),
