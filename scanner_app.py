@@ -2,6 +2,7 @@ import sys
 import os
 import stat
 import time
+import datetime
 import glob
 import json
 import html
@@ -134,7 +135,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPixmap, QImage, QKeySequence, QShortcut, QPainter, QBrush, QIcon,
-    QPen, QPolygonF, QPainterPath, QRadialGradient
+    QPen, QPolygonF, QPainterPath, QRadialGradient, QRegion, QFontMetricsF
 )
 from PyQt6.QtSvg import QSvgRenderer
 
@@ -1450,13 +1451,58 @@ class BusyBar(QWidget):
             p.drawRoundedRect(QRectF(0, 0, w, h), h / 2, h / 2)
 
 
+def _texto_con_borde(p, x, y, texto, fuente, relleno, borde=None, ancho_borde=0.0):
+    """Texto centrado en (x, y), con un contorno para que se lea sobre cualquier fondo."""
+    m = QFontMetricsF(fuente)
+    camino = QPainterPath()
+    camino.addText(x - m.horizontalAdvance(texto) / 2, y + (m.ascent() - m.descent()) / 2,
+                   fuente, texto)
+    if borde is not None and ancho_borde > 0:
+        p.strokePath(camino, QPen(QColor(borde), ancho_borde, Qt.PenStyle.SolidLine,
+                                  Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.fillPath(camino, QColor(relleno))
+
+
+def _marquesina(p, w, h, corrimiento, color_encendida, apagada, paso=30, radio=5, margen=8):
+    """
+    Lamparitas alrededor de un rectángulo de w x h, encendidas de a una cada
+    tres y corriéndose con `corrimiento`. `color_encendida` recibe el número
+    de lamparita y devuelve su color.
+    """
+    for i in range(int(2 * (w + h) // paso)):
+        d = i * paso
+        if d < w:
+            x, y = d, margen
+        elif d < w + h:
+            x, y = w - margen, d - w
+        elif d < 2 * w + h:
+            x, y = w - (d - w - h), h - margen
+        else:
+            x, y = margen, h - (d - 2 * w - h)
+        p.setBrush(color_encendida(i) if (i + corrimiento) % 3 == 0 else apagada)
+        p.drawEllipse(QRectF(x - radio, y - radio, 2 * radio, 2 * radio))
+
+
+def _poligono_estrella(x, y, radio, puntas, interior):
+    """Estrella de `puntas` puntas con la primera hacia arriba; `interior` es la proporción del radio de adentro."""
+    puntos = []
+    for i in range(puntas * 2):
+        r = radio if i % 2 == 0 else radio * interior
+        an = -math.pi / 2 + i * math.pi / puntas
+        puntos.append(QPointF(x + math.cos(an) * r, y + math.sin(an) * r))
+    return QPolygonF(puntos)
+
+
 class Festejo(QWidget):
     """
     Festejo del canje del contador, dibujado con QPainter sobre una capa
     transparente que cubre la ventana y no toma clics. Cambia según el
     escalón canjeado: un fueguito que quema el número (antes de 10), confeti
-    (10), confeti grande y desparramado (25), fuegos artificiales (50) y un
-    diamante con rayos y marquesina de casino (100).
+    (10), confeti grande y desparramado (25), fuegos artificiales (50), un
+    diamante con rayos y marquesina de casino (100), lluvia de billetes (250)
+    y un jackpot de monedas que se apilan al pie (500).
+    Hay además dos que no salen de un canje: la medalla del récord del día
+    ("record") y el cofre sorpresa ("cofre"), que al abrirse larga su premio.
     Se destruye sola al terminar. Las bibliotecas de confeti para la web
     necesitarían un navegador embebido (QtWebEngine, más de 100 MB): así no
     agrega nada al ejecutable.
@@ -1465,12 +1511,15 @@ class Festejo(QWidget):
     COLORES = ["#D84315", "#F0C36B", "#6FCF73", "#569CD6", "#C586C0", "#FFFFFF"]
     DORADOS = ["#FFC83D", "#FFE08A", "#FFFFFF", "#F0C36B"]
     HIELO = ["#9FF0FF", "#FFFFFF", "#CFF7FF", "#5CC9E0"]
+    MEDALLA = ["#FFC83D", "#FFE08A", "#FFFFFF", "#1565C0", "#C62828"]
     # Colores de los fuegos artificiales: cada explosión usa una paleta.
     PALETAS_FUEGOS = [
         ["#FFC83D", "#FFE08A"], ["#FFFFFF", "#CFF7FF"], ["#FF6B4A", "#FFC83D"],
         ["#6FCF73", "#E9FFD9"], ["#569CD6", "#BFE3FF"], ["#C586C0", "#FFD6F6"],
     ]
-    DURACIONES = {0: 2.0, 10: 3.0, 25: 4.2, 50: 5.6, 100: 5.0}
+    DURACIONES = {0: 2.0, 10: 3.0, 25: 4.2, 50: 5.6, 100: 5.0, 250: 5.2, 500: 6.6,
+                  "record": 6.2, "cofre": 3.4}
+    _billetes = None    # (frente, dorso), dibujados una sola vez
     QUEMADO = 0.75     # segundo del fueguito en que el número ya no se ve
     # Llama plana en tres capas, de afuera hacia adentro (viewBox de 64x80,
     # con la base abajo). Cada capa titila por su cuenta.
@@ -1488,10 +1537,12 @@ class Festejo(QWidget):
     CUADRO_MS = 16     # unos 60 cuadros por segundo
     GRAVEDAD = 1400    # píxeles por segundo al cuadrado, para el confeti
 
-    def __init__(self, parent, origen, nivel, zona=None, al_quemar=None):
+    def __init__(self, parent, origen, nivel, zona=None, al_quemar=None, datos=None):
         """
         `zona` es el rectángulo del contador y `al_quemar` lo que se llama
         cuando el fuego tapa el número: solo para el fueguito (nivel 0).
+        `datos` lleva lo que muestran la medalla (fichas, semana, record) y
+        el cofre (premio, al_abrir).
         """
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -1508,6 +1559,8 @@ class Festejo(QWidget):
         self._t = 0.0
         self._zona = QRectF(zona) if zona is not None else None
         self._al_quemar = al_quemar
+        self._datos = datos or {}
+        self._pila = []         # alto de las monedas apiladas, cada 6 px de ancho
         self._capas_llama = []
         if nivel == 0:
             for color, camino in self.LLAMA_SVG:
@@ -1515,7 +1568,9 @@ class Festejo(QWidget):
                        f'<path fill="{color}" d="{camino}"/></svg>')
                 self._capas_llama.append(QSvgRenderer(QByteArray(svg.encode("utf-8"))))
         {0: self._armar_0, 10: self._armar_10, 25: self._armar_25,
-         50: self._armar_50, 100: self._armar_100}[nivel]()
+         50: self._armar_50, 100: self._armar_100, 250: self._armar_250,
+         500: self._armar_500, "record": self._armar_record,
+         "cofre": self._armar_cofre}[nivel]()
         self._agenda.sort(key=lambda e: e[0])
         self._particulas, self._nuevas = self._nuevas, []
 
@@ -1651,6 +1706,165 @@ class Festejo(QWidget):
     def _centro_diamante(self):
         return self.width() / 2, self.height() / 2 - 10
 
+    def _billete(self, x, y, vx, vy, fajo=False):
+        rnd = self._rnd
+        self._nuevas.append({
+            "tipo": "billete", "x": x, "y": y, "vx": vx, "vy": vy, "fajo": fajo,
+            "fase": rnd.uniform(0, math.tau), "vfase": rnd.uniform(2, 4),     # hamaca
+            "vuelta": rnd.uniform(0, math.tau), "vvuelta": rnd.uniform(3, 7),  # da vueltas
+            "giro0": rnd.uniform(-0.6, 0.6), "esc": rnd.uniform(0.85, 1.1),
+            "edad": 0.0, "vida": rnd.uniform(4.0, 6.0),
+        })
+
+    def _armar_250(self):
+        # Un fajo que se desarma desde el contador y después billetes que
+        # caen de arriba a lo ancho, con algunos fajos enteros que bajan más
+        # rápido.
+        rnd, w = self._rnd, self.width()
+        ox, oy = self._origen
+        for _ in range(45):
+            self._billete(ox + rnd.uniform(-10, 10), oy,
+                          rnd.uniform(-420, 300), rnd.uniform(-950, -500))
+        for _ in range(110):
+            x = rnd.uniform(0.0, 1.0) * w
+            self._agenda.append((rnd.uniform(0.15, 3.2), lambda x=x: self._billete(
+                x, -20, rnd.uniform(-20, 20), rnd.uniform(40, 120))))
+        for _ in range(6):
+            x = rnd.uniform(40, max(41, w - 40))
+            self._agenda.append((rnd.uniform(0.3, 2.2), lambda x=x: self._billete(
+                x, -30, rnd.uniform(-30, 30), rnd.uniform(60, 160), fajo=True)))
+
+    @classmethod
+    def _sprites_billete(cls):
+        """Frente y dorso de un billete verde tipo dólar, inventado, a doble resolución."""
+        if cls._billetes is not None:
+            return cls._billetes
+
+        def fuente(px, serif=False):
+            f = QFont("Georgia" if serif else "Arial")
+            f.setPixelSize(px)
+            f.setBold(True)
+            return f
+
+        def texto(p, x, y, s, f, color):
+            p.setFont(f)
+            p.setPen(QColor(color))
+            p.drawText(QRectF(x - 20, y - 8, 40, 16), Qt.AlignmentFlag.AlignCenter, s)
+            p.setPen(Qt.PenStyle.NoPen)
+
+        hechos = []
+        for frente in (True, False):
+            pix = QPixmap(240, 104)
+            pix.fill(QColor("#DCE7CF" if frente else "#5E8F5A"))
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            p.scale(2, 2)
+            tinta = "#2F5D3A" if frente else "#1F4426"
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(tinta), 3))
+            p.drawRect(QRectF(2.5, 2.5, 115, 47))
+            p.setPen(QPen(QColor(tinta), 1))
+            p.drawRect(QRectF(7, 7, 106, 38))
+            if frente:
+                # Óvalo con un retrato cualquiera, dos sellos y el valor en
+                # las cuatro esquinas.
+                p.setPen(QPen(QColor(tinta), 1.5))
+                p.setBrush(QColor("#C3D6B0"))
+                p.drawEllipse(QRectF(46, 9, 28, 34))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#4E7A55"))
+                p.drawEllipse(QRectF(54.5, 15.5, 11, 11))
+                p.drawChord(QRectF(50, 30, 20, 14), 0, 180 * 16)
+                p.setBrush(QColor("#4A4F48"))
+                p.drawEllipse(QRectF(25, 19, 14, 14))
+                p.setBrush(QColor("#3C7A4A"))
+                p.drawEllipse(QRectF(81, 19, 14, 14))
+                texto(p, 88, 26.5, "$", fuente(9), "#DCE7CF")
+                for x, y in ((20, 14), (100, 14), (20, 39), (100, 39)):
+                    texto(p, x, y, "100", fuente(10), tinta)
+            else:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#86B381"))
+                p.drawEllipse(QRectF(36, 11, 48, 30))
+                texto(p, 60, 27, "100", fuente(20, serif=True), tinta)
+                texto(p, 18, 14, "100", fuente(9), tinta)
+                texto(p, 102, 39, "100", fuente(9), tinta)
+            p.end()
+            hechos.append(pix)
+        cls._billetes = tuple(hechos)
+        return cls._billetes
+
+    def _moneda(self, x, y, vx, vy):
+        rnd = self._rnd
+        self._nuevas.append({
+            "tipo": "moneda", "x": x, "y": y, "vx": vx, "vy": vy,
+            "fase": rnd.uniform(0, math.tau), "vfase": rnd.uniform(8, 16),
+            "r": rnd.uniform(7, 10), "quieta": False,
+            # Viven hasta que el festejo las apaga (_apagar_monedas).
+            "edad": 0.0, "vida": 99.0,
+        })
+
+    def _armar_500(self):
+        # Un chorro de monedas que sale del contador, rebota y se va apilando
+        # al pie; la ventana tiembla un poco al principio. JACKPOT, el número
+        # y la marquesina se dibujan según el tiempo.
+        rnd = self._rnd
+        ox, oy = self._origen
+        self._pila = [0.0] * (int(self.width() // 6) + 2)
+        for i in range(170):
+            self._agenda.append((i * 0.016, lambda: self._moneda(
+                ox + rnd.uniform(-6, 6), oy - 8, rnd.uniform(-380, 200), rnd.uniform(-1000, -620))))
+        self._agenda.append((6.0, self._apagar_monedas))
+
+    def _apagar_monedas(self):
+        for p in self._particulas:
+            if p["tipo"] == "moneda":
+                p["vida"] = p["edad"] + 0.5
+
+    def _piso(self, x):
+        """Altura del piso en x: el borde de abajo menos lo que ya se apiló."""
+        if not self._pila:
+            return self.height() - 2
+        i = max(0, min(len(self._pila) - 1, int(x // 6)))
+        return self.height() - 2 - self._pila[i]
+
+    def _apilar(self, x, r):
+        i = int(x // 6)
+        tope = self.height() * 0.3
+        for j in range(i - 3, i + 4):
+            if 0 <= j < len(self._pila):
+                self._pila[j] = min(tope, self._pila[j] + r * 0.5 * (1 - abs(j - i) / 4))
+
+    def _armar_record(self):
+        # La medalla, la cinta y el cartel se dibujan según el tiempo en
+        # _pintar_medalla; acá solo el confeti cuando la medalla llega.
+        w, h = self.width(), self.height()
+        self._agenda.append((0.6, lambda: self._confeti(
+            w / 2, h * 0.32, 90, -90, 180, 200, 600, colores=self.MEDALLA)))
+        self._agenda.append((0.55, lambda: self._destello(w / 2, h * 0.36 - 10, 30)))
+
+    def _armar_cofre(self):
+        # El cofre (en _pintar_cofre) cae, tiembla y se abre a los 1,7 s.
+        # El premio arranca cuando el cofre ya se está yendo.
+        w, h = self.width(), self.height()
+        self._agenda.append((1.75, lambda: self._destello(w / 2, h * 0.45, 40)))
+        al_abrir = self._datos.get("al_abrir")
+        if al_abrir is not None:
+            self._agenda.append((3.0, al_abrir))
+
+    def _destello(self, x, y, n):
+        """Chispas doradas para todos lados, como un golpe de luz."""
+        rnd = self._rnd
+        for _ in range(n):
+            a = rnd.uniform(0, math.tau)
+            v = rnd.uniform(80, 280)
+            self._nuevas.append({
+                "tipo": "chispa", "x": x, "y": y, "vx": math.cos(a) * v, "vy": math.sin(a) * v,
+                "color": QColor(rnd.choice(["#FFE08A", "#FFFFFF", "#FFC83D"])),
+                "edad": 0.0, "vida": rnd.uniform(0.5, 0.9), "titila": False,
+            })
+
     # --- Movimiento ---
 
     def _avanzar(self):
@@ -1682,6 +1896,39 @@ class Festejo(QWidget):
             elif tipo == "chispa":
                 p["vx"] *= freno_chispa
                 p["vy"] = p["vy"] * freno_chispa + 140 * dt
+            elif tipo == "billete":
+                # Mucho rozamiento: caen despacio, hamacándose de un lado al
+                # otro. Los fajos pesan más y casi no se hamacan.
+                f = (0.985 if p["fajo"] else 0.95) ** (dt * 60)
+                p["vx"] *= f
+                p["vy"] = p["vy"] * f + (900 if p["fajo"] else 300) * dt
+                p["fase"] += p["vfase"] * dt
+                p["vuelta"] += p["vvuelta"] * dt
+                if not p["fajo"]:
+                    p["x"] += math.sin(p["fase"]) * 50 * dt
+            elif tipo == "moneda":
+                # Se mueven por su cuenta: rebotan en los costados y en el
+                # piso, y cuando ya casi no rebotan se quedan apiladas.
+                if not p["quieta"]:
+                    r = p["r"]
+                    p["vy"] += self.GRAVEDAD * dt
+                    p["x"] += p["vx"] * dt
+                    p["y"] += p["vy"] * dt
+                    p["fase"] += p["vfase"] * dt
+                    if p["x"] < r:
+                        p["x"], p["vx"] = r, abs(p["vx"]) * 0.6
+                    elif p["x"] > self.width() - r:
+                        p["x"], p["vx"] = self.width() - r, -abs(p["vx"]) * 0.6
+                    piso = self._piso(p["x"]) - r * 0.4
+                    if p["y"] >= piso and p["vy"] > 0:
+                        p["y"] = piso
+                        p["vy"] *= -0.4
+                        p["vx"] *= 0.6
+                        if abs(p["vy"]) < 110:
+                            p["quieta"] = True
+                            self._apilar(p["x"], r)
+                vivas.append(p)
+                continue
             elif tipo == "humo":
                 p["vy"] -= p["empuje"] * dt   # sube cada vez un poco más rápido
             elif tipo == "cohete":
@@ -1712,9 +1959,20 @@ class Festejo(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.setPen(Qt.PenStyle.NoPen)
         if self._nivel == 100:
             self._pintar_diamante(p)
+        elif self._nivel == 500:
+            self._oscurecer(p, 0.4)
+            p.setOpacity(self._entrada_salida())
+            _marquesina(p, self.width(), self.height(), int(self._t * 9),
+                        lambda i: QColor("#FFE08A"), QColor("#5A4A20"))
+            p.setOpacity(1.0)
+        elif self._nivel == "record":
+            self._oscurecer(p, 0.5)
+        elif self._nivel == "cofre":
+            self._oscurecer(p, 0.55)
         if self._nivel == 0:
             self._pintar_carbon(p)
             self._pintar_llamas(p)
@@ -1767,6 +2025,300 @@ class Festejo(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor("#FFF3C4"))
                 p.drawEllipse(QRectF(c["x"] - 2.5, c["y"] - 2.5, 5, 5))
+            elif tipo == "billete":
+                self._pintar_billete(p, c)
+            elif tipo == "moneda":
+                self._pintar_moneda(p, c)
+        p.setOpacity(1.0)
+        if self._nivel == 250:
+            self._cartel(p, self._t, "250 escaneos", "#B9F5AE", "#173404", 4.6, 30,
+                         self.height() * 0.4)
+        elif self._nivel == 500:
+            self._pintar_jackpot(p)
+        elif self._nivel == "record":
+            self._pintar_medalla(p)
+        elif self._nivel == "cofre":
+            self._pintar_cofre(p)
+
+    def _entrada_salida(self):
+        """De 0 a 1 en los primeros 0,3 s y de vuelta a 0 en el último medio segundo."""
+        return min(1.0, self._t / 0.3) * max(0.0, min(1.0, (self._duracion - self._t) / 0.5))
+
+    def _oscurecer(self, p, alfa):
+        p.fillRect(self.rect(), QColor(0, 0, 0, int(255 * alfa * self._entrada_salida())))
+
+    def _fuente(self, px, negrita=True):
+        f = QFont(self.font())
+        f.setPixelSize(px)
+        f.setBold(negrita)
+        return f
+
+    def _cartel(self, p, t, texto, relleno, borde, hasta, tamano, y):
+        """Un texto que entra con un rebote y se desvanece a los `hasta` segundos."""
+        if t < 0.25:
+            return
+        alfa = min(1.0, (t - 0.25) / 0.25) * max(0.0, min(1.0, 1 - (t - hasta) / 0.5))
+        esc = self._rebote((t - 0.25) / 0.5)
+        if alfa <= 0 or esc <= 0.01:
+            return
+        p.save()
+        p.setOpacity(alfa)
+        p.translate(self.width() / 2, y)
+        p.scale(esc, esc)
+        _texto_con_borde(p, 0, 0, texto, self._fuente(tamano), relleno, borde, 6)
+        p.restore()
+
+    def _pintar_billete(self, p, c):
+        frente, dorso = self._sprites_billete()
+        w, h = 56 * c["esc"], 24 * c["esc"]
+        p.save()
+        p.translate(c["x"], c["y"])
+        if c["fajo"]:
+            # Tres billetes corridos y una faja de papel.
+            p.rotate(math.degrees(c["giro0"] * 0.5 + math.sin(c["fase"]) * 0.12))
+            for j in (2, 1, 0):
+                p.drawPixmap(QRectF(-w / 2 + j * 1.5, -h / 2 + j * 2, w, h), frente,
+                             QRectF(frente.rect()))
+            p.setBrush(QColor("#EADFBF"))
+            p.drawRect(QRectF(-6, -h / 2 - 1, 12, h + 6))
+        else:
+            # Achatar un eje simula que da vueltas; del otro lado se ve el dorso.
+            vuelta = math.cos(c["vuelta"])
+            p.rotate(math.degrees(c["giro0"] + math.sin(c["fase"]) * 0.5))
+            p.scale(1.0, max(0.12, abs(vuelta)))
+            cara = frente if vuelta > 0 else dorso
+            p.drawPixmap(QRectF(-w / 2, -h / 2, w, h), cara, QRectF(cara.rect()))
+        p.restore()
+
+    def _pintar_moneda(self, p, c):
+        r = c["r"]
+        de_canto = abs(math.cos(c["fase"]))
+        p.save()
+        p.translate(c["x"], c["y"])
+        if c["quieta"]:
+            p.scale(1.0, 0.5)       # acostada en la pila
+        else:
+            p.scale(max(0.1, de_canto), 1.0)
+        p.setBrush(QColor("#B8860B"))
+        p.drawEllipse(QRectF(-r, -r, 2 * r, 2 * r))
+        p.setBrush(QColor("#FFC83D"))
+        p.drawEllipse(QRectF(-r * 0.78, -r * 0.78, 1.56 * r, 1.56 * r))
+        if not c["quieta"] and de_canto > 0.5:
+            p.setPen(QColor("#8A6200"))
+            p.setFont(self._fuente(round(r * 1.1)))
+            p.drawText(QRectF(-r, -r, 2 * r, 2 * r), Qt.AlignmentFlag.AlignCenter, "$")
+            p.setPen(Qt.PenStyle.NoPen)
+        p.restore()
+
+    def _pintar_jackpot(self, p):
+        """JACKPOT con las letras saltando en ola y, centrado abajo, el número."""
+        t, w, h = self._t, self.width(), self.height()
+        if t < 0.25:
+            return
+        p.save()
+        p.setOpacity(min(1.0, (t - 0.25) / 0.25) * max(0.0, min(1.0, (5.9 - t) / 0.5)))
+        fuente = self._fuente(50)
+        m = QFontMetricsF(fuente)
+        palabra = "JACKPOT"
+        anchos = [m.horizontalAdvance(letra) for letra in palabra]
+        x = w / 2 - (sum(anchos) + 5 * (len(palabra) - 1)) / 2
+        for i, letra in enumerate(palabra):
+            esc = self._rebote((t - 0.25 - i * 0.07) / 0.4)
+            if esc > 0.01:
+                salto = -abs(math.sin(t * 6 + i * 0.7)) * 8
+                p.save()
+                p.translate(x + anchos[i] / 2, h / 2 - 34 + salto)
+                p.scale(esc, esc)
+                color = "#FFE08A" if (int(t * 8) + i) % 2 else "#FFFFFF"
+                _texto_con_borde(p, 0, 0, letra, fuente, color, "#3A2A00", 8)
+                p.restore()
+            x += anchos[i] + 5
+        p.restore()
+        self._cartel(p, t - 0.35, "500 escaneos", "#FFE08A", "#3A2A00", 5.3, 30, h / 2 + 18)
+
+    def _pintar_medalla(self, p):
+        """
+        La medalla del récord: cae colgada de una cinta, rebota como un
+        resorte, se hamaca y abajo muestra el cartel con la semana. Al final
+        vuelve a subir.
+        """
+        t, w, h = self._t, self.width(), self.height()
+        fichas = self._datos.get("fichas", 0)
+        dias = self._datos.get("semana", [])
+        record = self._datos.get("record", 0)
+        ax, ay, largo = w / 2, -10.0, h * 0.36
+        if t < 0.55:
+            l = largo * (t / 0.55) ** 2
+        else:
+            k = t - 0.55
+            l = largo * (1 + 0.1 * math.exp(-5 * k) * math.sin(k * 18))
+        if t > 5.6:
+            l -= (largo + 200) * ((t - 5.6) / 0.6) ** 2
+        ang = 0.0 if t < 0.55 else 0.2 * math.exp(-1.5 * (t - 0.55)) * math.sin((t - 0.55) * 5.5)
+        vis = max(0.0, min(1.0, (6.1 - t) / 0.5))
+        mx, my = ax + math.sin(ang) * l, ay + math.cos(ang) * l
+
+        # Rayos girando detrás.
+        if t > 0.55:
+            p.save()
+            p.setOpacity(0.16 * min(1.0, (t - 0.55) / 0.4) * vis)
+            p.translate(mx, my)
+            p.rotate(math.degrees(t * 0.6))
+            p.setBrush(QColor("#FFE08A"))
+            for _ in range(12):
+                p.rotate(30)
+                p.drawPolygon(QPolygonF([QPointF(0, 0), QPointF(420, -24), QPointF(420, 24)]))
+            p.restore()
+
+        p.save()
+        p.setOpacity(vis)
+        p.translate(ax, ay)
+        p.rotate(-math.degrees(ang))
+        # La cinta: dos tiras que bajan en V hasta la medalla.
+        lb = max(0.0, l - 34)
+        p.setBrush(QColor("#1565C0"))
+        p.drawPolygon(QPolygonF([QPointF(-36, 0), QPointF(-14, 0), QPointF(14, lb), QPointF(-8, lb)]))
+        p.setBrush(QColor("#C62828"))
+        p.drawPolygon(QPolygonF([QPointF(14, 0), QPointF(36, 0), QPointF(8, lb), QPointF(-14, lb)]))
+        p.setPen(QPen(QColor("#FFFFFF"), 3))
+        p.drawLine(QLineF(-25, 0, 3, lb))
+        p.drawLine(QLineF(25, 0, -3, lb))
+        p.setPen(Qt.PenStyle.NoPen)
+
+        p.translate(0, l)
+        p.save()
+        if t < 0.55:
+            p.scale(max(0.15, abs(math.cos(t * 16))), 1.0)    # gira mientras cae
+        p.setBrush(QColor("#B8860B"))
+        p.drawEllipse(QRectF(-38, -38, 76, 76))
+        p.setBrush(QColor("#FFC83D"))
+        p.drawEllipse(QRectF(-32, -32, 64, 64))
+        p.setPen(QPen(QColor("#D9A520"), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(-25, -25, 50, 50))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#FFF3C4"))
+        p.drawPolygon(_poligono_estrella(0, 0, 17, 5, 0.45))
+        # Un brillo que le cruza cada tanto.
+        brillo = ((t - 0.8) % 1.8) / 0.6
+        if t > 0.8 and brillo <= 1:
+            p.save()
+            borde = QPainterPath()
+            borde.addEllipse(QRectF(-38, -38, 76, 76))
+            p.setClipPath(borde)
+            x = -60 + brillo * 120
+            p.setBrush(QColor(255, 255, 255, 140))
+            p.drawPolygon(QPolygonF([QPointF(x, -45), QPointF(x + 14, -45),
+                                     QPointF(x - 6, 45), QPointF(x - 20, 45)]))
+            p.restore()
+        p.restore()
+
+        # El cartel con las fichas de hoy y la semana en barras; la línea
+        # punteada es el récord que se acaba de pasar.
+        if t > 0.55:
+            p.setOpacity(vis * min(1.0, (t - 0.55) / 0.3))
+            p.setPen(QPen(QColor("#FFC83D"), 1.5))
+            p.setBrush(QColor("#2B1E00"))
+            p.drawRoundedRect(QRectF(-100, 46, 200, 128), 10, 10)
+            p.setPen(QColor("#FFE08A"))
+            p.setFont(self._fuente(13, negrita=False))
+            p.drawText(QRectF(-100, 50, 200, 20), Qt.AlignmentFlag.AlignCenter, "Récord del día")
+            p.setPen(QColor("#FFFFFF"))
+            p.setFont(self._fuente(18))
+            p.drawText(QRectF(-100, 68, 200, 24), Qt.AlignmentFlag.AlignCenter, f"{fichas} fichas")
+            if dias:
+                maximo = max([record, 1] + [n for _, n, _, _ in dias])
+                hueco = 8
+                ancho = min(24.0, (172 - hueco * (len(dias) - 1)) / len(dias))
+                total = ancho * len(dias) + hueco * (len(dias) - 1)
+                p.setFont(self._fuente(11, negrita=False))
+                for i, (etiqueta, n, es_hoy, futuro) in enumerate(dias):
+                    x = -total / 2 + i * (ancho + hueco)
+                    crece = self._rebote((t - 0.9 - i * 0.1) / 0.35)
+                    alto = (max(3.0, n / maximo * 38) if n > 0 else 0) * crece
+                    if alto > 0.1:
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(QColor("#FFC83D" if es_hoy else "#6B5A30"))
+                        p.drawRoundedRect(QRectF(x, 148 - alto, ancho, alto), 3, 3)
+                    p.setPen(QColor("#6B6250" if futuro else "#CFC3A0"))
+                    p.drawText(QRectF(x - 6, 152, ancho + 12, 16), Qt.AlignmentFlag.AlignCenter, etiqueta)
+                    if es_hoy and crece >= 1:
+                        p.setPen(QColor("#FFE08A"))
+                        p.drawText(QRectF(x - 10, 148 - alto - 18, ancho + 20, 16),
+                                   Qt.AlignmentFlag.AlignCenter, str(n))
+                if record > 0:
+                    lapiz = QPen(QColor("#FFE08A"), 1)
+                    lapiz.setDashPattern([3, 3])
+                    p.setPen(lapiz)
+                    y = 148 - record / maximo * 38
+                    p.drawLine(QLineF(-total / 2 - 6, y, total / 2 + 6, y))
+            p.setPen(Qt.PenStyle.NoPen)
+        p.restore()
+
+        # Destellos alrededor.
+        if 0.7 < t < 5.8:
+            p.setBrush(QColor("#FFFFFF"))
+            for i in range(8):
+                an = i * 0.785 + t * 0.4
+                radio = 58 + (i * 13) % 24
+                brillo = (math.sin(t * 6 + i * 1.9) + 1) / 2
+                p.setOpacity(brillo * vis)
+                p.drawPolygon(_poligono_estrella(mx + math.cos(an) * radio,
+                                                 my + math.sin(an) * radio * 0.8,
+                                                 3 + brillo * 5, 4, 0.3))
+            p.setOpacity(1.0)
+
+    def _pintar_cofre(self, p):
+        """El cofre cae con un rebote, tiembla cada vez más, se abre con luz y dice qué tocó."""
+        t, w, h = self._t, self.width(), self.height()
+        cx, cy, ancho, alto, tapa = w / 2, h * 0.52, 120, 66, 28
+        sale = max(0.0, min(1.0, (3.4 - t) / 0.4))
+        entra = self._rebote(t / 0.45) * 1.4
+        tiembla = math.sin(t * 45) * 0.08 * ((t - 0.6) / 1.1) if 0.6 < t < 1.7 else 0.0
+        abierto = max(0.0, min(1.0, (t - 1.7) / 0.2))
+        if abierto > 0:
+            p.save()
+            p.setOpacity(sale * 0.2 * abierto)
+            p.translate(cx, cy - alto / 2)
+            p.rotate(math.degrees(t * 0.8))
+            p.setBrush(QColor("#FFE08A"))
+            for _ in range(10):
+                p.rotate(36)
+                p.drawPolygon(QPolygonF([QPointF(0, 0), QPointF(500, -28), QPointF(500, 28)]))
+            p.restore()
+        if entra > 0.01:
+            p.save()
+            p.setOpacity(sale)
+            p.translate(cx, cy)
+            p.rotate(math.degrees(tiembla))
+            p.scale(entra, entra)
+            if abierto > 0:
+                # La tapa abierta: se ve por dentro, y la luz que sale.
+                p.setBrush(QColor("#4A2C12"))
+                p.drawRoundedRect(QRectF(-ancho / 2, -alto / 2 - 48 * abierto, ancho, 48 * abierto), 6, 6)
+                p.setBrush(QColor("#FFE08A"))
+                p.drawRoundedRect(QRectF(-ancho / 2 + 8, -alto / 2 - 5, ancho - 16, 9), 4, 4)
+            p.setBrush(QColor("#8B5A2B"))
+            p.drawRoundedRect(QRectF(-ancho / 2, -alto / 2, ancho, alto), 6, 6)
+            p.setBrush(QColor("#FFC83D"))
+            p.drawRect(QRectF(-ancho / 2 + 14, -alto / 2, 10, alto))
+            p.drawRect(QRectF(ancho / 2 - 24, -alto / 2, 10, alto))
+            if abierto < 1:
+                l = tapa * (1 - abierto)
+                p.setBrush(QColor("#A0683A"))
+                p.drawRoundedRect(QRectF(-ancho / 2 - 3, -alto / 2 - l, ancho + 6, l), 6, 6)
+                p.setBrush(QColor("#FFC83D"))
+                p.drawRect(QRectF(-ancho / 2 + 14, -alto / 2 - l, 10, l))
+                p.drawRect(QRectF(ancho / 2 - 24, -alto / 2 - l, 10, l))
+            p.setBrush(QColor("#FFE08A"))
+            p.drawRoundedRect(QRectF(-9, -alto / 2 - 6, 18, 20), 3, 3)
+            p.setBrush(QColor("#5A3A10"))
+            p.drawRect(QRectF(-2, -alto / 2 + 1, 4, 7))
+            p.restore()
+        if t > 2.0:
+            premio = self._datos.get("premio", "")
+            self._cartel(p, t - 1.75, f"Te tocó: {premio}", "#FFFFFF", "#3A2A00", 1.1, 24,
+                         cy - alto * 0.7 - 90)
 
     def _pintar_carbon(self, p):
         """El número carbonizándose: se oscurece, lo tapa, y al apagarse aparece el cero."""
@@ -1842,24 +2394,9 @@ class Festejo(QWidget):
                                      QPointF(largo, largo * 0.07)]))
         p.restore()
 
-        # Marquesina: lamparitas alrededor de la ventana, encendidas de a una
-        # cada tres y corriéndose.
-        paso = 30
-        corrimiento = int(t * 9)
+        # Marquesina: lamparitas alrededor de la ventana.
         p.setOpacity(salida * min(1.0, t / 0.3))
-        for i in range(int(2 * (w + h) // paso)):
-            d = i * paso
-            if d < w:
-                x, y = d, 8
-            elif d < w + h:
-                x, y = w - 8, d - w
-            elif d < 2 * w + h:
-                x, y = w - (d - w - h), h - 8
-            else:
-                x, y = 8, h - (d - 2 * w - h)
-            encendida = (i + corrimiento) % 3 == 0
-            p.setBrush(QColor("#FFE08A") if encendida else QColor("#5A4A20"))
-            p.drawEllipse(QRectF(x - 5, y - 5, 10, 10))
+        _marquesina(p, w, h, int(t * 9), lambda i: QColor("#FFE08A"), QColor("#5A4A20"))
 
         # El diamante entra girando, se pasa de tamaño y vuelve; después
         # late apenas y cada tanto le cruza un destello.
@@ -1947,12 +2484,18 @@ class ContadorEscaneos(QPushButton):
     canjear para llegar al siguiente. Un canje lo vuelve a cero.
 
     El color acompaña: apagado hasta 10 y de ahí, de a poco con cada escaneo,
-    bronce, plata (25), oro (50) y diamante (100), que además brilla.
+    bronce, plata (25), oro (50) y diamante (100); más arriba, verde billete
+    (250) y oro de jackpot (500). Desde el diamante, además brilla. Durante la
+    hora loca pasa por todos los colores (set_fiesta).
+
+    Con el mouse encima no muestra un tooltip sino la semana (señal
+    `senalado`, que la ventana usa para mostrar PanelSemana).
     """
 
     canjeado = pyqtSignal(int)      # el escalón canjeado; 0 antes de META
+    senalado = pyqtSignal(bool)     # el mouse entró (True) o salió (False)
     META = 10
-    ESCALONES = (10, 25, 50, 100)
+    ESCALONES = (10, 25, 50, 100, 250, 500)
     # (desde, hasta, (fondo, texto) al principio, (fondo, texto) al final).
     TRAMOS = [
         (10, 25, ("#CD7F32", "#2B1A08"), ("#C9CED6", "#2A2E35")),
@@ -1969,6 +2512,7 @@ class ContadorEscaneos(QPushButton):
         self.clicked.connect(self._canjear)
         self._brillo = QTimer(self)
         self._brillo.timeout.connect(self._pintar)
+        self._fiesta = False
         self.set_valor(valor)
 
     @staticmethod
@@ -1980,12 +2524,19 @@ class ContadorEscaneos(QPushButton):
 
     def colores(self):
         """(fondo, texto) para el valor actual, o None si todavía está apagado."""
+        if self._fiesta:
+            tono = (time.perf_counter() * 110) % 360
+            return QColor.fromHslF(tono / 360, 0.9, 0.62), QColor("#111111")
         v = self.valor
         if v < self.META:
             return None
         if v >= 100:
-            # Brillo de diamante: va y viene entre el celeste y casi blanco.
+            # Brillo: va y viene entre el color del escalón y uno más claro.
             t = (math.sin(time.perf_counter() * 3) + 1) / 2
+            if v >= 500:
+                return self._mezcla("#FFB300", "#FFE08A", t), QColor("#3A2A00")
+            if v >= 250:
+                return self._mezcla("#4FBF5A", "#B9F5AE", t), QColor("#173404")
             return self._mezcla("#9FF0FF", "#F2FCFF", t), QColor("#0B3A48")
         for desde, hasta, (f0, t0), (f1, t1) in self.TRAMOS:
             if v < hasta:
@@ -2006,8 +2557,15 @@ class ContadorEscaneos(QPushButton):
         self.setEnabled(listo)
         self.setCursor(Qt.CursorShape.PointingHandCursor if listo
                        else Qt.CursorShape.ArrowCursor)
-        self.setToolTip("Canjear" if listo else "Imágenes escaneadas")
-        if self.valor >= 100:
+        self._animar()
+
+    def set_fiesta(self, activa):
+        """Durante la hora loca el contador pasa por todos los colores."""
+        self._fiesta = activa
+        self._animar()
+
+    def _animar(self):
+        if self.valor >= 100 or self._fiesta:
             self._brillo.start(80)
         else:
             self._brillo.stop()
@@ -2026,13 +2584,846 @@ class ContadorEscaneos(QPushButton):
             f"#contadorEscaneos:pressed {{ background-color: {fondo.darker(115).name()}; }}"
         )
 
-    def sumar(self):
-        self.set_valor(self.valor + 1)
+    def sumar(self, cantidad=1):
+        self.set_valor(self.valor + cantidad)
 
     def _canjear(self):
         escalon = self.escalon()
         if escalon is not None:
             self.canjeado.emit(escalon)
+
+    def enterEvent(self, event):
+        self.senalado.emit(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.senalado.emit(False)
+        super().leaveEvent(event)
+
+
+DIAS_SEMANA = ("Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom")
+
+
+def _hoy():
+    return datetime.date.today().isoformat()
+
+
+def _semana(por_dia, hoy=None):
+    """
+    Los días de la semana de `hoy` como (etiqueta, fichas, es hoy, todavía no
+    llegó). De lunes a viernes siempre; sábado y domingo solo si hubo
+    escaneos o si es hoy.
+    """
+    hoy = hoy or datetime.date.today()
+    lunes = hoy - datetime.timedelta(days=hoy.weekday())
+    dias = []
+    for i, etiqueta in enumerate(DIAS_SEMANA):
+        dia = lunes + datetime.timedelta(days=i)
+        n = por_dia.get(dia.isoformat(), 0)
+        if i >= 5 and n == 0 and dia != hoy:
+            continue
+        dias.append((etiqueta, n, dia == hoy, dia > hoy))
+    return dias
+
+
+def _record_previo(por_dia, hoy):
+    """(fichas, fecha) del mejor día de siempre sin contar `hoy`; (0, None) si no hay otro día."""
+    otros = [(n, dia) for dia, n in por_dia.items() if dia != hoy]
+    return max(otros) if otros else (0, None)
+
+
+class PanelSemana(QWidget):
+    """
+    Los escaneos de cada día de la semana en barras, con el récord de siempre
+    como una línea punteada. Aparece arriba del contador mientras el mouse
+    está encima y no toma clics.
+    """
+
+    ANCHO, ALTO = 250, 146
+    BASE = 98       # dónde apoyan las barras
+    MAXIMO = 52     # alto de la barra más alta
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setFixedSize(self.ANCHO, self.ALTO)
+        self._dias, self._record, self._fecha, self._pie = [], 0, None, ""
+        self.hide()
+
+    def mostrar(self, dias, record, fecha_record, pie, esquina):
+        """`esquina` es el punto (en el padre) donde va la esquina de abajo a la derecha."""
+        self._dias, self._record, self._fecha, self._pie = dias, record, fecha_record, pie
+        self.setFixedSize(self.ANCHO, self.ALTO if pie else self.ALTO - 22)
+        self.move(max(4, esquina.x() - self.width()), esquina.y() - self.height())
+        self.raise_()
+        self.show()
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        p.setPen(QPen(QColor("#454545"), 1))
+        p.setBrush(QColor("#252526"))
+        p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 8, 8)
+
+        fuente = QFont(self.font())
+        fuente.setPixelSize(12)
+        p.setFont(fuente)
+        p.setPen(QColor("#CCCCCC"))
+        p.drawText(QRectF(12, 8, w - 24, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   "Esta semana")
+        if self._record > 0:
+            dia, mes = self._fecha[8:10], self._fecha[5:7]
+            record = f"Récord: {self._record} ({dia}/{mes})"
+        else:
+            record = "Todavía sin récord"
+        p.setPen(QColor("#FFC83D"))
+        p.drawText(QRectF(12, 8, w - 24, 18), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   record)
+
+        if self._dias:
+            maximo = max([self._record, 1] + [n for _, n, _, _ in self._dias])
+            hueco = 8
+            ancho = (w - 24 - hueco * (len(self._dias) - 1)) / len(self._dias)
+            # La línea del récord va primero, detrás de las barras: así no
+            # tacha los números.
+            if self._record > 0:
+                lapiz = QPen(QColor("#FFC83D"), 1)
+                lapiz.setDashPattern([3, 3])
+                p.setPen(lapiz)
+                y = self.BASE - self._record / maximo * self.MAXIMO
+                p.drawLine(QLineF(8, y, w - 8, y))
+            fuente.setPixelSize(11)
+            p.setFont(fuente)
+            for i, (etiqueta, n, es_hoy, futuro) in enumerate(self._dias):
+                x = 12 + i * (ancho + hueco)
+                if not futuro:
+                    alto = max(2, round(n / maximo * self.MAXIMO)) if n > 0 else 0
+                    if n > 0:
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(QColor("#FFC83D" if es_hoy else "#55555A"))
+                        p.drawRoundedRect(QRectF(x, self.BASE - alto, ancho, alto), 3, 3)
+                    # El número adentro de la barra si entra; si no, arriba.
+                    adentro = alto >= 18
+                    if adentro:
+                        p.setPen(QColor("#3A2A00" if es_hoy else "#E0E0E0"))
+                        caja = QRectF(x, self.BASE - alto + 2, ancho, 14)
+                    else:
+                        p.setPen(QColor("#FFE08A" if es_hoy else "#BBBBBB"))
+                        caja = QRectF(x - 4, self.BASE - alto - 16, ancho + 8, 14)
+                    p.drawText(caja, Qt.AlignmentFlag.AlignCenter, str(n))
+                p.setPen(QColor("#5A5A5A" if futuro else "#9D9D9D"))
+                p.drawText(QRectF(x - 4, self.BASE + 3, ancho + 8, 14),
+                           Qt.AlignmentFlag.AlignCenter, etiqueta)
+        if self._pie:
+            p.setPen(QColor("#8A8A8A"))
+            p.drawText(QRectF(12, h - 26, w - 24, 18), Qt.AlignmentFlag.AlignCenter, self._pie)
+
+
+class BotonCofre(QWidget):
+    """El cofre sorpresa esperando al lado del contador: se hamaca hasta que lo abren."""
+
+    abierto = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(28, 26)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Cofre sorpresa: clic para abrirlo")
+        self._inicio = time.perf_counter()
+        self._reloj = QTimer(self)
+        self._reloj.timeout.connect(self.update)
+
+    def showEvent(self, event):
+        self._reloj.start(33)
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._reloj.stop()
+        super().hideEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.abierto.emit()
+
+    def paintEvent(self, event):
+        t = time.perf_counter() - self._inicio
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        # Se hamaca a golpes, cada poco más de un segundo, y quieto entre uno y otro.
+        golpe = max(0.0, math.sin(t * 2.5)) ** 2
+        p.translate(self.width() / 2, self.height() - 4)
+        p.rotate(math.sin(t * 14) * 12 * golpe)
+        p.translate(0, -abs(math.sin(t * 7)) * 3 * golpe)
+        p.setBrush(QColor("#8B5A2B"))
+        p.drawRoundedRect(QRectF(-10, -11, 20, 11), 2, 2)
+        p.setBrush(QColor("#A0683A"))
+        p.drawRoundedRect(QRectF(-11, -17, 22, 7), 3, 3)
+        p.setBrush(QColor("#FFC83D"))
+        p.drawRect(QRectF(-7, -17, 3, 17))
+        p.drawRect(QRectF(4, -17, 3, 17))
+        p.drawRoundedRect(QRectF(-2.5, -13, 5, 6), 1, 1)
+
+
+HORA_LOCA_DESDE = 7         # la hora loca arranca en un momento sorteado entre
+HORA_LOCA_HASTA = 13        # estas dos horas, con el primer escaneo después
+COFRE_PROBABILIDAD = 0.01   # después de cada escaneo
+COFRES_POR_DIA = 2
+
+
+def _plan_hora_loca(fecha, rnd=random):
+    """El plan de la hora loca de un día: un momento al azar dentro del horario."""
+    seg = rnd.randrange(HORA_LOCA_DESDE * 3600, HORA_LOCA_HASTA * 3600)
+    return {"fecha": fecha, "hecha": False,
+            "momento": f"{seg // 3600:02d}:{seg % 3600 // 60:02d}:{seg % 60:02d}"}
+
+
+def _toca_hora_loca(plan, ahora):
+    """Si un escaneo a la hora `ahora` ("HH:MM:SS") arranca la hora loca del plan."""
+    return (not plan.get("hecha")
+            and plan.get("momento", "99") <= ahora < f"{HORA_LOCA_HASTA:02d}:00:00")
+
+
+class HoraLoca(QWidget):
+    """
+    La hora loca: unos minutos en los que cada escaneo suma varias veces al
+    contador. Arranca con una tragamonedas: con la palanca (arrastrándola,
+    con un clic o con Enter) gira un rodillo que decide el multiplicador.
+
+    Es una capa sobre la ventana, como Festejo. Mientras está la máquina toma
+    los clics, para la palanca, y la ventana no deja escanear. Durante el
+    juego no toma clics: solo dibuja lamparitas en el borde, el cartel con la
+    cuenta regresiva y lo que salta con cada escaneo, y repinta nada más esas
+    partes para no redibujar la imagen escaneada 30 veces por segundo durante
+    varios minutos.
+
+    El rodillo muestra x50 y x100 pero nunca frena ahí: el resultado se
+    sortea antes de girar (PROBABILIDADES) y el rodillo se acomoda para caer
+    en él. La mayoría de las veces (CASI) pasa rozando un x50 o un x100 antes
+    de caer; RODILLO está ordenado para que cada resultado posible tenga uno
+    justo antes.
+
+    Con `multiplicador` (el premio del cofre) no hay máquina: se anuncia y
+    arranca directamente.
+    """
+
+    PROBABILIDADES = ((5, 0.70), (10, 0.25), (20, 0.05))
+    RODILLO = (5, 100, 5, 10, 20, 5, 50, 10, 5, 20, 10, 5, 50, 20, 10, 20)
+    ALTO_SIMBOLO = 64
+    COLOR_SIMBOLO = {5: "#2E7D32", 10: "#1565C0", 20: "#C62828", 50: "#7B1FA2", 100: "#FFC400"}
+    COLOR_MULT = {2: "#C9CED6", 5: "#6FCF73", 10: "#56B6F7", 20: "#FF6B4A",
+                  50: "#CE93D8", 100: "#FFD54F"}
+    CASI = 0.7
+    ESPERA_PALANCA = 8.0    # si nadie la toca, se tira sola
+    VUELTA = 3.8            # lo que tarda el rodillo en frenar
+    MAQUINA = ("espera", "palanca", "giro", "casi", "aterriza", "directo")
+    CENTRO = 71             # mitad del alto de la máquina, en sus coordenadas
+
+    def __init__(self, ventana, multiplicador=None, minutos=3, al_terminar=None):
+        base = ventana.centralWidget()
+        super().__init__(base)
+        self._ventana = ventana
+        self._al_terminar = al_terminar
+        self._rnd = random.Random()
+        self._minutos = minutos
+        self._duracion = minutos * 60
+        if multiplicador is None:
+            r, acumulado = self._rnd.random(), 0.0
+            for valor, prob in self.PROBABILIDADES:
+                acumulado += prob
+                if r < acumulado:
+                    break
+            multiplicador = valor
+            primera = "espera"
+        else:
+            primera = "directo"
+        self.mult = multiplicador
+        self.total = 0                  # lo que sumó de más, para el resumen
+        self._inicio = self._ultimo = self._ahora = time.perf_counter()
+        self._off = self._rnd.randrange(len(self.RODILLO)) * self.ALTO_SIMBOLO
+        self._vel = 0.0
+        self._luces = 0.0               # avance de las lamparitas
+        self._palanca = 0.0             # 0 arriba, 1 abajo del todo
+        self._arrastre = None           # y donde empezó a arrastrar la palanca
+        self._movido = False
+        self._casi = None               # el x50 o x100 que roza, si roza
+        self._destino = 0
+        self._particulas = []
+        self._sacudida = (0.0, 0.0)     # (fuerza, hasta cuándo)
+        self._ultimo_estilo = 0.0
+        self._cartel = QRectF()
+        self._region_anterior = QRegion()
+
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setStyleSheet("background: transparent;")
+        self.setGeometry(base.rect())
+        self._fase(primera)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._avanzar)
+        self._timer.start(16)
+        base.installEventFilter(self)
+        self.raise_()
+        self.show()
+        if primera == "directo":
+            self._festejar(self.height() / 2)
+
+    def eventFilter(self, obj, event):
+        if obj is self.parent() and event.type() == QEvent.Type.Resize:
+            self.setGeometry(obj.rect())
+        return False
+
+    # --- Lo que pregunta la ventana ---
+
+    def en_maquina(self):
+        """True mientras está la máquina: Enter tira de la palanca y no se escanea."""
+        return self._fase_actual in self.MAQUINA
+
+    def en_juego(self):
+        return self._fase_actual == "juego"
+
+    def multiplicador(self):
+        return self.mult if self.en_juego() else 1
+
+    def sumo(self, cantidad):
+        """Un escaneo durante el juego: el número salta del botón y chispas en el contador."""
+        v = self._ventana
+        self.total += cantidad
+        # Sale del botón, corrido a la derecha para no taparse con el cartel.
+        boton = v.btn_scan.mapTo(self.parent(), QPoint(v.btn_scan.width() * 4 // 5,
+                                                       v.btn_scan.height() // 2))
+        contador = v.contador.mapTo(self.parent(), v.contador.rect().center())
+        tono = (self._ahora * 110) % 360
+        self._particulas.append({
+            "tipo": "texto", "x": float(boton.x()), "y": float(boton.y()), "vy": -90.0,
+            "texto": f"+{cantidad}", "color": QColor.fromHslF(tono / 360, 1.0, 0.66),
+            "tamano": round(22 + cantidad * 0.6), "edad": 0.0, "vida": 1.3,
+        })
+        self._chispas(contador.x(), contador.y(), 16 + cantidad,
+                      ["#FFE08A", "#FFFFFF", self.COLOR_MULT[self.mult]])
+
+    def tirar(self):
+        """Tirar de la palanca (clic, Enter o se cansó de esperar)."""
+        if self._fase_actual != "espera":
+            return
+        self._arrastre = None
+        self._palanca0 = self._palanca
+        self._fase("palanca")
+
+    # --- Fases ---
+
+    def _fase(self, fase):
+        self._fase_actual = fase
+        self._desde = time.perf_counter()
+        en_maquina = fase in self.MAQUINA
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not en_maquina)
+        self.setCursor(Qt.CursorShape.OpenHandCursor if fase == "espera"
+                       else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def _girar(self):
+        n = len(self.RODILLO)
+        posibles = [i for i in range(n) if self.RODILLO[i] == self.mult]
+        rozan = [i for i in posibles if self.RODILLO[(i - 1) % n] >= 50]
+        if rozan and self._rnd.random() < self.CASI:
+            elegido = self._rnd.choice(rozan)
+            self._casi = self.RODILLO[(elegido - 1) % n]
+        else:
+            elegido = self._rnd.choice(posibles)
+            self._casi = None
+        # Unas cuantas vueltas completas y después el elegido. El rodillo
+        # baja: el símbolo i queda en la línea cuando el corrimiento es i
+        # alturas, así que el anterior al elegido pasa por la línea justo antes.
+        destino = math.ceil((self._off / self.ALTO_SIMBOLO + 42) / n) * n + elegido
+        self._destino = destino
+        self._off0 = self._off
+        if self._casi:
+            # Frena con el x50/x100 un poco antes de la línea.
+            self._offF = (destino - 1.14) * self.ALTO_SIMBOLO
+        else:
+            self._offF = destino * self.ALTO_SIMBOLO
+        self._sacudir(3, 0.2)
+        self._fase("giro")
+
+    def _aterrizar(self):
+        self._sacudir(4 + self.mult * 0.25, 0.45)
+        self._fase("aterriza")
+        self._festejar(self._centro_visor())
+
+    def _festejar(self, y):
+        x = self.width() / 2
+        Festejo(self.parent(), QPoint(round(x), round(y)), 10)
+        self._chispas(x, y, 40, ["#FFFFFF", "#FFE08A", self.COLOR_MULT[self.mult]])
+
+    def _empezar_juego(self):
+        v = self._ventana
+        v.contador.set_fiesta(True)
+        v.lbl_scan_key.setText(f"x{self.mult}")
+        v.lbl_info.setVisible(False)    # su lugar lo ocupa el cartel
+        self._fase("juego")
+        self._timer.start(33)
+
+    def _terminar(self):
+        v = self._ventana
+        v.contador.set_fiesta(False)
+        v.lbl_scan_key.setText("Enter")
+        v.btn_scan.setStyleSheet("")
+        v.lbl_info.setVisible(v._preview_pixmap is not None and bool(v.lbl_info.text()))
+        self._timer.start(16)
+        self._fase("fin")
+        Festejo(self.parent(), QPoint(self.width() // 2, round(self.height() * 0.55)), 10)
+
+    def _cerrar(self):
+        self._timer.stop()
+        self.parent().removeEventFilter(self)
+        if self._al_terminar is not None:
+            self._al_terminar()
+        self.deleteLater()
+
+    # --- Palanca con el mouse ---
+
+    def mousePressEvent(self, event):
+        if self._fase_actual == "espera" and event.button() == Qt.MouseButton.LeftButton:
+            self._arrastre = event.position().y()
+            self._movido = False
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event):
+        if self._arrastre is None:
+            return
+        d = event.position().y() - self._arrastre
+        if abs(d) > 6:
+            self._movido = True
+        self._palanca = max(0.0, min(1.0, d / (110 * self._escala())))
+
+    def mouseReleaseEvent(self, event):
+        if self._arrastre is None:
+            return
+        self._arrastre = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        # Un clic tira; si la arrastró, solo si la bajó más de la mitad.
+        if not self._movido or self._palanca > 0.5:
+            self.tirar()
+
+    # --- Movimiento ---
+
+    def _avanzar(self):
+        ahora = time.perf_counter()
+        dt = min(ahora - self._ultimo, 0.05)
+        self._ultimo = self._ahora = ahora
+        fase, k = self._fase_actual, ahora - self._desde
+        antes = self._off
+        alto = self.ALTO_SIMBOLO
+
+        if fase == "espera":
+            if self._arrastre is None:
+                self._palanca -= self._palanca * min(1.0, dt * 12)    # vuelve con resorte
+                if k > self.ESPERA_PALANCA:
+                    self.tirar()
+        elif fase != "palanca":
+            self._palanca -= self._palanca * min(1.0, dt * 9)
+
+        if fase == "palanca":
+            bajada = 0.04 + 0.18 * (1 - self._palanca0)
+            self._palanca = min(1.0, self._palanca0 + (1 - self._palanca0) * k / bajada)
+            if k >= bajada:
+                self._girar()
+        elif fase == "giro":
+            u = min(1.0, k / self.VUELTA)
+            self._off = self._off0 + (self._offF - self._off0) * (1 - (1 - u) ** 4)
+            if u >= 1:
+                if self._casi:
+                    self._offC = self._off
+                    self._fase("casi")
+                else:
+                    self._aterrizar()
+        elif fase == "casi":
+            # Se arrastra despacito hasta casi la línea... y se pasa de largo.
+            if k < 1.3:
+                self._off = self._offC + 0.09 * alto * (k / 1.3) ** 2
+                self._sacudir(1.5, 0.05)
+            else:
+                u = min(1.0, (k - 1.3) / 0.45)
+                desde = self._offC + 0.09 * alto
+                self._off = desde + (self._destino * alto - desde) * Festejo._rebote(u)
+                if u >= 1:
+                    self._off = self._destino * alto
+                    self._aterrizar()
+        elif fase in ("aterriza", "directo"):
+            if k >= 1.9:
+                self._empezar_juego()
+        elif fase == "juego":
+            if k >= self._duracion:
+                self._terminar()
+        elif fase == "fin":
+            if k >= 3.0:
+                self._cerrar()
+                return
+
+        self._vel = abs(self._off - antes) / dt if dt > 0 else 0.0
+        en_juego = self._fase_actual == "juego"
+        self._luces += dt * (1.5 if en_juego else min(4.0, 0.3 + self._vel / 400))
+
+        vivas = []
+        for q in self._particulas:
+            q["edad"] += dt
+            if q["edad"] >= q["vida"]:
+                continue
+            if q["tipo"] == "chispa":
+                q["vx"] *= 0.94 ** (dt * 60)
+                q["vy"] = q["vy"] * 0.94 ** (dt * 60) + 200 * dt
+                q["x"] += q["vx"] * dt
+            else:
+                q["vy"] *= 0.97 ** (dt * 60)
+            q["y"] += q["vy"] * dt
+            vivas.append(q)
+        self._particulas = vivas
+
+        if en_juego:
+            if ahora - self._ultimo_estilo > 0.08:
+                self._ultimo_estilo = ahora
+                self._colorear_boton()
+            if self._rnd.random() < 0.02 and not self._cartel.isEmpty():
+                c = self._cartel.center()
+                self._chispas(c.x() + self._rnd.uniform(-1, 1) * self._cartel.width() / 2,
+                              c.y(), 10, ["#FFE08A", "#FFFFFF"])
+            region = self._region_juego()
+            self.update(region.united(self._region_anterior))
+            self._region_anterior = region
+        else:
+            self.update()
+
+    def _colorear_boton(self):
+        tono = (self._ahora * 110) % 360
+        c = QColor.fromHslF(tono / 360, 0.8, 0.44)
+        self._ventana.btn_scan.setStyleSheet(
+            f"#scanButton {{ background-color: {c.name()}; }}"
+            f"#scanButton:hover {{ background-color: {c.lighter(112).name()}; }}"
+            f"#scanButton:disabled {{ background-color: {c.darker(220).name()}; }}"
+        )
+
+    def _region_juego(self):
+        """Lo que cambia durante el juego: el borde, el cartel y lo que salta."""
+        w, h = self.width(), self.height()
+        r = QRegion(0, 0, w, 16)
+        for parte in (QRegion(0, h - 16, w, 16), QRegion(0, 0, 16, h), QRegion(w - 16, 0, 16, h),
+                      QRegion(self._cartel.toAlignedRect().adjusted(-14, -8, 14, 8))):
+            r = r.united(parte)
+        for q in self._particulas:
+            ancho = 90 if q["tipo"] == "texto" else 10
+            r = r.united(QRegion(int(q["x"]) - ancho // 2, int(q["y"]) - 26, ancho, 52))
+        return r
+
+    def _chispas(self, x, y, n, colores):
+        for _ in range(n):
+            a = self._rnd.uniform(0, math.tau)
+            v = self._rnd.uniform(80, 280)
+            self._particulas.append({
+                "tipo": "chispa", "x": float(x), "y": float(y),
+                "vx": math.cos(a) * v, "vy": math.sin(a) * v,
+                "color": QColor(self._rnd.choice(colores)),
+                "edad": 0.0, "vida": self._rnd.uniform(0.4, 0.8),
+            })
+
+    def _sacudir(self, fuerza, segundos):
+        f, hasta = self._sacudida
+        self._sacudida = (max(f, fuerza), max(hasta, time.perf_counter() + segundos))
+
+    def _desplazamiento(self):
+        """Cuánto se corre la máquina en este cuadro por la sacudida."""
+        f, hasta = self._sacudida
+        resto = hasta - self._ahora
+        if resto <= 0:
+            self._sacudida = (0.0, 0.0)
+            return 0.0, 0.0
+        a = f * min(1.0, resto / 0.3)
+        return self._rnd.uniform(-a, a), self._rnd.uniform(-a, a)
+
+    def _escala(self):
+        return max(0.8, min(1.35, self.height() / 560))
+
+    def _centro_visor(self):
+        # La línea del rodillo está 84 unidades debajo del borde de arriba
+        # del cuerpo, y la máquina se centra en CENTRO.
+        return self.height() / 2 + (84 - self.CENTRO) * self._escala()
+
+    # --- Dibujo ---
+
+    def _fuente(self, px, negrita=True, familia=None):
+        f = QFont(familia) if familia else QFont(self.font())
+        f.setPixelSize(px)
+        f.setBold(negrita)
+        return f
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        fase, k = self._fase_actual, self._ahora - self._desde
+        w, h = self.width(), self.height()
+        t = self._ahora - self._inicio
+
+        if fase == "juego":
+            tono = (self._ahora * 110) % 360
+            _marquesina(p, w, h, int(self._luces * 10),
+                        lambda i: QColor.fromHslF(((tono + i * 14) % 360) / 360, 1.0, 0.62),
+                        QColor(255, 255, 255, 30), paso=22, radio=4, margen=6)
+            self._pintar_cartel(p, k)
+        elif fase == "fin":
+            alfa = 0.65 * min(1.0, k / 0.3) * max(0.0, min(1.0, (3 - k) / 0.5))
+            p.fillRect(self.rect(), QColor(0, 0, 0, int(255 * alfa)))
+        else:
+            p.fillRect(self.rect(), QColor(0, 0, 0, int(255 * 0.8 * min(1.0, t / 0.25))))
+            _marquesina(p, w, h, int(self._luces * 10), lambda i: QColor("#FFE08A"),
+                        QColor("#4A3A10"), paso=22, radio=4, margen=6)
+            if fase != "directo":
+                self._pintar_maquina(p, fase, t)
+
+        for q in self._particulas:
+            p.setOpacity(max(0.0, min(1.0, (q["vida"] - q["edad"]) * 2)))
+            if q["tipo"] == "chispa":
+                p.setBrush(q["color"])
+                p.drawEllipse(QRectF(q["x"] - 2.2, q["y"] - 2.2, 4.4, 4.4))
+            else:
+                esc = Festejo._rebote(q["edad"] / 0.25)
+                if esc > 0.01:
+                    p.save()
+                    p.translate(q["x"], q["y"])
+                    p.scale(esc, esc)
+                    _texto_con_borde(p, 0, 0, q["texto"], self._fuente(q["tamano"]),
+                                     q["color"], QColor(0, 0, 0, 150), 4)
+                    p.restore()
+        p.setOpacity(1.0)
+
+        if fase == "espera":
+            p.setOpacity(0.6 + 0.4 * math.sin(t * 5))
+            _texto_con_borde(p, w / 2, h - 30, "Tirá de la palanca: arrastrala para abajo o apretá Enter",
+                             self._fuente(15), "#FFFFFF")
+            p.setOpacity(1.0)
+        elif fase in ("aterriza", "directo"):
+            directo = fase == "directo"
+            y = h / 2 - 10 if directo else self._centro_visor()
+            esc = Festejo._rebote(k / 0.45) * (1 + 0.04 * math.sin(t * 10)) * (1 if directo else 1.25)
+            if esc > 0.01:
+                p.save()
+                p.translate(w / 2, y)
+                p.scale(esc, esc)
+                _texto_con_borde(p, 0, 0, f"x{self.mult}", self._fuente(64 if directo else 48),
+                                 self.COLOR_MULT[self.mult], "#000000", 8)
+                p.restore()
+            minutos = "1 minuto" if self._minutos == 1 else f"{self._minutos} minutos"
+            p.setOpacity(min(1.0, k / 0.4))
+            texto = (f"Hora loca de bolsillo: {minutos}" if directo
+                     else f"Cada escaneo vale x{self.mult} durante {minutos}")
+            _texto_con_borde(p, w / 2, h / 2 + 46 if directo else h - 30, texto,
+                             self._fuente(15, negrita=False), "#EEEEEE")
+            p.setOpacity(1.0)
+            p.fillRect(self.rect(), QColor(255, 255, 255, int(255 * 0.7 * max(0.0, 1 - k / 0.3))))
+        elif fase == "fin":
+            alfa = max(0.0, min(1.0, k / 0.3) * min(1.0, (3 - k) / 0.5))
+            p.setOpacity(alfa)
+            _texto_con_borde(p, w / 2, h / 2 - 34, "Se terminó la hora loca", self._fuente(20), "#FFFFFF")
+            esc = Festejo._rebote(k / 0.5)
+            if esc > 0.01:
+                p.translate(w / 2, h / 2 + 14)
+                p.scale(esc, esc)
+                n = round(self.total * min(1.0, k))
+                texto = f"+{n} escaneos" if self.total else "Esta vez no sumaste"
+                _texto_con_borde(p, 0, 0, texto, self._fuente(36), "#FFE08A")
+
+    def _pintar_cartel(self, p, k):
+        """La cuenta regresiva, donde va el pie de la imagen; en los últimos 10 s se pone roja."""
+        v = self._ventana
+        fila = v.lbl_info.parentWidget()
+        centro = fila.mapTo(self.parent(), fila.rect().center())
+        resto = max(0.0, self._duracion - k)
+        seg = math.ceil(resto)
+        texto = f"¡Hora loca! x{self.mult}    {seg // 60}:{seg % 60:02d}"
+        fuente = self._fuente(16)
+        ancho = QFontMetricsF(fuente).horizontalAdvance(texto) + 40
+        final = resto < 10
+        esc = 1 + (0.08 * abs(math.sin(self._ahora * 9)) if final else 0.03 * math.sin(self._ahora * 6))
+        if k < 0.4:
+            esc *= max(0.01, Festejo._rebote(k / 0.4))
+        if final:
+            fondo = QColor("#E53935") if math.sin(self._ahora * 18) > 0 else QColor("#7F1D1D")
+        else:
+            fondo = QColor.fromHslF(((self._ahora * 110) % 360) / 360, 0.85, 0.42)
+        # Lo que se repinta: el cartel con el margen de su latido.
+        self._cartel = QRectF(centro.x() - ancho * 0.56, centro.y() - 18, ancho * 1.12, 36)
+        p.save()
+        p.translate(centro.x(), centro.y())
+        p.scale(esc, esc)
+        p.setBrush(fondo)
+        p.drawRoundedRect(QRectF(-ancho / 2, -16, ancho, 32), 16, 16)
+        _texto_con_borde(p, 0, 1, texto, fuente, "#FFFFFF")
+        p.restore()
+
+    def _pintar_maquina(self, p, fase, t):
+        """La tragamonedas: arco con lamparitas, un solo rodillo detrás de un visor y la palanca."""
+        w, h = self.width(), self.height()
+        entra = Festejo._rebote(t / 0.5)
+        if entra <= 0.01:
+            return
+        esc = self._escala() * entra
+        dx, dy = self._desplazamiento()
+        p.save()
+        p.translate(w / 2 + dx, h / 2 + dy)
+        p.scale(esc, esc)
+        p.translate(0, -self.CENTRO)
+
+        # Tambores de los costados, detrás del cuerpo.
+        p.setBrush(QColor("#A8250D"))
+        p.drawRoundedRect(QRectF(-128, 64, 26, 92), 10, 10)
+        p.drawRoundedRect(QRectF(102, 64, 26, 92), 10, 10)
+        p.setBrush(QColor("#D0361A"))
+        p.drawRoundedRect(QRectF(-124, 70, 8, 80), 4, 4)
+        p.drawRoundedRect(QRectF(106, 70, 8, 80), 4, 4)
+
+        # Arco de arriba, con lamparitas y el cartel dorado adentro.
+        arco = QPainterPath()
+        arco.moveTo(-80, 4)
+        arco.arcTo(QRectF(-80, -76, 160, 160), 180, -180)
+        arco.lineTo(58, 4)
+        arco.arcTo(QRectF(-58, -54, 116, 116), 0, 180)
+        arco.closeSubpath()
+        p.fillPath(arco, QColor("#D63A1A"))
+        p.setBrush(QColor("#4A0806"))
+        p.drawChord(QRectF(-58, -54, 116, 116), 0, 180 * 16)
+        cadena = int(self._luces * 10)
+        for i in range(9):
+            an = math.pi + i * math.pi / 8
+            x, y = math.cos(an) * 69, 4 + math.sin(an) * 69
+            prendida = (i + cadena) % 2 == 0
+            p.setBrush(QColor("#FFE08A" if prendida else "#8A5A10"))
+            p.drawEllipse(QRectF(x - 6, y - 6, 12, 12))
+            if prendida:
+                p.setBrush(QColor("#FFFFFF"))
+                p.drawEllipse(QRectF(x - 3.5, y - 3.5, 4, 4))
+        fuente = self._fuente(20)
+        m = QFontMetricsF(fuente)
+        for renglon, (palabra, y) in enumerate((("HORA", -34), ("LOCA", -11))):
+            anchos = [m.horizontalAdvance(letra) for letra in palabra]
+            x = -(sum(anchos) + 2 * (len(palabra) - 1)) / 2
+            for i, letra in enumerate(palabra):
+                # Un brillo que recorre las letras, siempre en dorado.
+                brillo = (math.sin(t * 4 - (i + renglon * 4) * 0.7) + 1) / 2
+                color = ContadorEscaneos._mezcla("#E0A100", "#FFF2B8", brillo)
+                _texto_con_borde(p, x + anchos[i] / 2, y, letra, fuente, color, "#3A2500", 4)
+                x += anchos[i] + 2
+
+        # Cuerpo, con un reborde más oscuro abajo.
+        p.setBrush(QColor("#A8250D"))
+        p.drawRoundedRect(QRectF(-112, 194, 224, 22), 10, 10)
+        p.setBrush(QColor("#E8401C"))
+        p.drawRoundedRect(QRectF(-105, 0, 210, 208), 22, 22)
+        p.setBrush(QColor(255, 255, 255, 46))
+        p.drawRoundedRect(QRectF(-95, 6, 190, 6), 3, 3)
+        p.setBrush(QColor("#B8290F"))
+        p.drawRoundedRect(QRectF(-88, 14, 176, 170), 14, 14)
+
+        # El visor con el rodillo: se ve el símbolo de la línea y apenas una
+        # punta del de arriba y del de abajo.
+        vy, va, vw = 24, 124, 120
+        vc = vy + va / 2
+        p.setBrush(QColor("#F2E6CC"))
+        p.drawRoundedRect(QRectF(-vw / 2 - 4, vy - 4, vw + 8, va + 8), 12, 12)
+        p.setBrush(QColor("#FFF8E6"))
+        p.drawRoundedRect(QRectF(-vw / 2, vy, vw, va), 10, 10)
+        p.save()
+        visor = QPainterPath()
+        visor.addRoundedRect(QRectF(-vw / 2, vy, vw, va), 10, 10)
+        p.setClipPath(visor)
+        alto = self.ALTO_SIMBOLO
+        fuente = self._fuente(40)
+        primero = round(self._off / alto)
+        borroso = self._vel > 700
+        for i in range(primero - 2, primero + 3):
+            y = vc - i * alto + self._off
+            valor = self.RODILLO[i % len(self.RODILLO)]
+            cae = fase == "aterriza" and i == self._destino
+            esc_s = (1 + 0.25 * max(0.0, 1 - (self._ahora - self._desde) / 0.35)
+                     + 0.04 * math.sin(t * 16)) if cae else 1.0
+            p.save()
+            p.translate(0, y)
+            p.scale(esc_s, esc_s)
+            copias = ((-14, 0.22), (14, 0.22), (0, 0.5)) if borroso else ((0, 1.0),)
+            for corrido, opacidad in copias:
+                p.setOpacity(opacidad)
+                self._simbolo(p, valor, corrido, fuente)
+            p.restore()
+        p.setOpacity(1.0)
+        # Sombra arriba y abajo para que se vea curvo, y un reflejo del vidrio.
+        sombra = QColor(90, 40, 0, 66)
+        p.fillRect(QRectF(-vw / 2, vy, vw, 18), sombra)
+        p.fillRect(QRectF(-vw / 2, vy + va - 18, vw, 18), sombra)
+        sombra.setAlpha(31)
+        p.fillRect(QRectF(-vw / 2, vy + 18, vw, 14), sombra)
+        p.fillRect(QRectF(-vw / 2, vy + va - 32, vw, 14), sombra)
+        p.setBrush(QColor(255, 255, 255, 70))
+        p.drawPolygon(QPolygonF([QPointF(-vw / 2 + 14, vy), QPointF(-vw / 2 + 30, vy),
+                                 QPointF(-vw / 2 + 8, vy + va), QPointF(-vw / 2 - 8, vy + va)]))
+        p.restore()
+        p.setPen(QPen(QColor(211, 47, 47, 140), 2))
+        p.drawLine(QLineF(-vw / 2, vc, vw / 2, vc))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#FFFFFF") if fase == "casi" and math.sin(t * 20) > 0 else QColor("#FFC83D"))
+        for lado in (-1, 1):
+            x = lado * (vw / 2 + 6)
+            p.drawPolygon(QPolygonF([QPointF(x + lado * 12, vc - 9), QPointF(x, vc),
+                                     QPointF(x + lado * 12, vc + 9)]))
+
+        # Pantallita de mensajes.
+        mensaje, prendido = "", True
+        if fase == "espera":
+            mensaje, prendido = "Tirá de la palanca", math.sin(t * 6) > -0.3
+        elif fase in ("palanca", "giro"):
+            mensaje = "Girando" + "." * (1 + int(t * 4) % 3)
+        elif fase == "casi":
+            mensaje, prendido = f"¿¡x{self._casi}!?", math.sin(t * 18) > 0
+        elif fase == "aterriza":
+            mensaje = (f"Casi x{self._casi}… salió x{self.mult}" if self._casi
+                       else f"¡Salió x{self.mult}!")
+        p.setBrush(QColor("#3A0A05"))
+        p.drawRoundedRect(QRectF(-80, 156, 160, 22), 6, 6)
+        if prendido:
+            p.setPen(QColor("#FFC83D"))
+            p.setFont(self._fuente(12, familia="Consolas"))
+            p.drawText(QRectF(-80, 156, 160, 22), Qt.AlignmentFlag.AlignCenter, mensaje)
+            p.setPen(Qt.PenStyle.NoPen)
+
+        # La palanca: sale del tambor derecho y baja en arco.
+        palanca = self._palanca
+        if fase == "espera" and self._arrastre is None:
+            palanca += 0.07 * max(0.0, math.sin(t * 3)) ** 8     # se mueve sola, para invitar
+        px, py = 116, 74
+        an = -1.05 + 2.05 * palanca
+        bx, by = px + math.cos(an) * 76, py + math.sin(an) * 76
+        p.setPen(QPen(QColor("#E9C9A0"), 10, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QLineF(px, py, bx, by))
+        p.setPen(QPen(QColor(255, 255, 255, 90), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QLineF(px + 2, py - 2, bx + 2, by - 2))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#8E1D0B"))
+        p.drawEllipse(QRectF(px - 9, py - 9, 18, 18))
+        p.setBrush(QColor("#D32F2F"))
+        p.drawEllipse(QRectF(bx - 16, by - 16, 32, 32))
+        p.setBrush(QColor("#FF8A80"))
+        p.drawEllipse(QRectF(bx - 10, by - 10, 10, 10))
+        if fase == "espera":
+            p.setOpacity(0.5 + 0.5 * math.sin(t * 6))
+            baja = 6 * abs(math.sin(t * 4))
+            fuente = self._fuente(16)
+            for corrido in (0, 16):
+                _texto_con_borde(p, bx + 34, by + baja + corrido, "▼", fuente, "#FFFFFF")
+            p.setOpacity(1.0)
+        p.restore()
+
+    def _simbolo(self, p, valor, y, fuente):
+        x100 = valor == 100
+        _texto_con_borde(p, 0, y, f"x{valor}", fuente, self.COLOR_SIMBOLO[valor],
+                         "#6B4A00" if x100 else None, 5 if x100 else 0)
 
 
 class Spinner(QWidget):
@@ -2227,6 +3618,22 @@ class ScannerApp(QMainWindow):
         self._escaneos = cfg.get("contador_escaneos", 0)
         if not isinstance(self._escaneos, int):
             self._escaneos = 0
+        # Fichas escaneadas por día ("AAAA-MM-DD": n), para la semana y el
+        # récord del día. Cuentan las imágenes de verdad, no lo que suma la
+        # hora loca: si no, cualquier día con hora loca sería récord.
+        por_dia = cfg.get("escaneos_por_dia")
+        self._por_dia = ({d: n for d, n in por_dia.items()
+                          if isinstance(d, str) and isinstance(n, int)}
+                         if isinstance(por_dia, dict) else {})
+        self._record_festejado = cfg.get("record_festejado")    # fecha de la última medalla
+        # La hora loca del día: cuándo toca y si ya pasó (ver _revisar_hora_loca).
+        plan = cfg.get("hora_loca")
+        self._plan_hora_loca = plan if isinstance(plan, dict) else None
+        self.hora_loca = None
+        # Cuántos cofres salieron hoy, y si quedó uno sin abrir al cerrar.
+        cofres = cfg.get("cofres")
+        self._cofres = cofres if isinstance(cofres, dict) else {}
+        self._cofre_pendiente = cfg.get("cofre_pendiente") is True
 
         self.setup_ui()
         self.apply_dark_theme()
@@ -2439,6 +3846,10 @@ class ScannerApp(QMainWindow):
         self.btn_log.toggled.connect(self.toggle_log)
         self.contador = ContadorEscaneos(self._escaneos)
         self.contador.canjeado.connect(self.canjear_contador)
+        self.contador.senalado.connect(self.mostrar_semana)
+        self.btn_cofre = BotonCofre()
+        self.btn_cofre.abierto.connect(self.abrir_cofre)
+        self.btn_cofre.setVisible(self._cofre_pendiente)
         self.lbl_status_icon = QLabel()
         self.lbl_status = ElidedLabel()
         self.lbl_status.setObjectName("statusLine")
@@ -2453,6 +3864,7 @@ class ScannerApp(QMainWindow):
         pie_layout.addWidget(self.lbl_status)
         pie_layout.addSpacing(6)
         pie_layout.addWidget(self.btn_log)
+        pie_layout.addWidget(self.btn_cofre)
         pie_layout.addWidget(self.contador)
         main_layout.addLayout(pie_layout)
         self.clear_warning()
@@ -2465,6 +3877,9 @@ class ScannerApp(QMainWindow):
         self.console.document().setMaximumBlockCount(100) # Limita el log a 100 mensajes
         main_layout.addWidget(self.console)
         self.toggle_log(False)
+
+        # La semana, flotando arriba del contador mientras el mouse está encima.
+        self.panel_semana = PanelSemana(central_widget)
 
         if not self.destino_disponible:
             self.log_to_console(
@@ -2789,8 +4204,18 @@ class ScannerApp(QMainWindow):
         else:
             self.busy_bar.stop()
 
+    def _maquina_a_la_vista(self):
+        """
+        Mientras está la tragamonedas no se escanea: Enter tira de la palanca.
+        Son unos segundos y la máquina tapa la ventana.
+        """
+        if self.hora_loca is not None and self.hora_loca.en_maquina():
+            self.hora_loca.tirar()
+            return True
+        return False
+
     def start_scan(self):
-        if not self.btn_scan.isEnabled():
+        if not self.btn_scan.isEnabled() or self._maquina_a_la_vista():
             return
 
         self.set_scanning(True, "Escaneando…")
@@ -2816,7 +4241,7 @@ class ScannerApp(QMainWindow):
         self.thread.start()
 
     def start_scan_manual(self):
-        if not self.btn_scan.isEnabled():
+        if not self.btn_scan.isEnabled() or self._maquina_a_la_vista():
             return
 
         self.set_scanning(True, "Modo manual activo…")
@@ -2839,8 +4264,110 @@ class ScannerApp(QMainWindow):
         self.thread.start()
 
     def contar_escaneo(self, *_):
-        self.contador.sumar()
+        hoy = _hoy()
+        self._por_dia[hoy] = self._por_dia.get(hoy, 0) + 1
+        cuanto = self.hora_loca.multiplicador() if self.hora_loca is not None else 1
+        self.contador.sumar(cuanto)
         self._guardar_contador()
+        if cuanto > 1:
+            self.hora_loca.sumo(cuanto)
+        # Si en el mismo escaneo cae la medalla, la hora loca espera a que
+        # termine; el cofre solo aparece al lado del contador.
+        medalla = self._revisar_record(hoy)
+        self._revisar_hora_loca(demora_ms=6500 if medalla else 0)
+        self._revisar_cofre(hoy)
+
+    def _revisar_record(self, hoy):
+        """
+        La medalla cae la primera vez en el día que se pasa el mejor día de
+        siempre. Hace falta otro día con escaneos para que haya un récord.
+        """
+        record, _ = _record_previo(self._por_dia, hoy)
+        if record <= 0 or self._record_festejado == hoy or self._por_dia[hoy] <= record:
+            return False
+        self._record_festejado = hoy
+        save_config(record_festejado=hoy)
+        base = self.centralWidget()
+        Festejo(base, base.rect().center(), "record", datos={
+            "fichas": self._por_dia[hoy], "semana": _semana(self._por_dia), "record": record,
+        })
+        self.log_to_console(f"Récord del día: {self._por_dia[hoy]} fichas (el anterior era {record}).")
+        return True
+
+    def mostrar_semana(self, visible):
+        if not visible:
+            self.panel_semana.hide()
+            return
+        hoy = _hoy()
+        record, fecha = _record_previo(self._por_dia, hoy)
+        if self._por_dia.get(hoy, 0) > record:
+            record, fecha = self._por_dia[hoy], hoy
+        base = self.centralWidget()
+        esquina = self.contador.mapTo(base, QPoint(self.contador.width(), -6))
+        self.panel_semana.mostrar(_semana(self._por_dia), record, fecha,
+                                  "Clic en el número para canjear" if self.contador.valor else "",
+                                  esquina)
+
+    def _revisar_hora_loca(self, demora_ms=0):
+        """
+        Una vez por día, en un momento sorteado entre HORA_LOCA_DESDE y
+        HORA_LOCA_HASTA, el primer escaneo trae la hora loca. El plan se
+        guarda para que cerrar y abrir el programa no vuelva a sortear ni la
+        repita.
+        """
+        hoy = _hoy()
+        if not self._plan_hora_loca or self._plan_hora_loca.get("fecha") != hoy:
+            self._plan_hora_loca = _plan_hora_loca(hoy)
+            save_config(hora_loca=self._plan_hora_loca)
+        if self.hora_loca is not None or not _toca_hora_loca(self._plan_hora_loca,
+                                                              time.strftime("%H:%M:%S")):
+            return
+        self._plan_hora_loca["hecha"] = True
+        save_config(hora_loca=self._plan_hora_loca)
+        QTimer.singleShot(demora_ms, self.empezar_hora_loca)
+
+    def empezar_hora_loca(self, multiplicador=None, minutos=3):
+        if self.hora_loca is not None:
+            return
+        self.panel_semana.hide()
+        self.hora_loca = HoraLoca(self, multiplicador, minutos, al_terminar=self._fin_hora_loca)
+
+    def _fin_hora_loca(self):
+        if self.hora_loca is not None and self.hora_loca.total:
+            self.log_to_console(f"Hora loca x{self.hora_loca.mult}: sumó {self.hora_loca.total} al contador.")
+        self.hora_loca = None
+
+    def _revisar_cofre(self, hoy):
+        """Después de un escaneo, de vez en cuando aparece un cofre al lado del contador."""
+        if self.btn_cofre.isVisible():
+            return
+        if self._cofres.get("fecha") != hoy:
+            self._cofres = {"fecha": hoy, "dados": 0}
+        if self._cofres["dados"] >= COFRES_POR_DIA or random.random() >= COFRE_PROBABILIDAD:
+            return
+        self._cofres["dados"] += 1
+        save_config(cofres=self._cofres, cofre_pendiente=True)
+        self.btn_cofre.show()
+
+    def abrir_cofre(self):
+        self.btn_cofre.hide()
+        save_config(cofre_pendiente=False)
+        base = self.centralWidget()
+        origen = self.contador.mapTo(base, self.contador.rect().center())
+        premios = [("lluvia de billetes", 250), ("jackpot", 500)]
+        if self.hora_loca is None:
+            premios.append(("x2 por un minuto", 2))
+        nombre, premio = random.choice(premios)
+
+        def al_abrir():
+            # Si mientras se abría arrancó la hora loca del día, la de
+            # bolsillo no puede ir encima: van billetes.
+            if premio == 2 and self.hora_loca is None:
+                self.empezar_hora_loca(2, 1)
+            else:
+                Festejo(base, origen, 500 if premio == 500 else 250)
+
+        Festejo(base, base.rect().center(), "cofre", datos={"premio": nombre, "al_abrir": al_abrir})
 
     def canjear_contador(self, escalon):
         base = self.centralWidget()
@@ -2864,7 +4391,8 @@ class ScannerApp(QMainWindow):
         self._guardar_contador()
 
     def _guardar_contador(self):
-        ok, detalle = save_config(contador_escaneos=self.contador.valor)
+        ok, detalle = save_config(contador_escaneos=self.contador.valor,
+                                  escaneos_por_dia=self._por_dia)
         if not ok:
             self.log_to_console(f"AVISO: no se pudo guardar el contador ({detalle}).")
 
@@ -3060,7 +4588,8 @@ class ScannerApp(QMainWindow):
             partes.append(_fmt_mb(mb))
         self.lbl_info.setText("  ·  ".join(partes))
         self.lbl_info.setToolTip(filepath)
-        self.lbl_info.setVisible(True)
+        # Durante la hora loca ese lugar lo ocupa el cartel con la cuenta regresiva.
+        self.lbl_info.setVisible(self.hora_loca is None or not self.hora_loca.en_juego())
 
         # Un recorte real a una resolución conocida corrige la estimación de
         # tamaño de la barra de calidad.
