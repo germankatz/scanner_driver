@@ -3454,6 +3454,7 @@ class CirculoColor(QWidget):
             if y + selector.height() > pantalla.bottom():
                 y = self.mapToGlobal(QPoint(0, 0)).y() - selector.height()
         selector.move(x, y)
+        self._selector = selector       # si nadie la guarda, Python la borra (ver abrir_paleta)
         selector.show()
         selector.setFocus()
 
@@ -4718,6 +4719,9 @@ class ScannerApp(QMainWindow):
             x = max(pantalla.left(), min(x, pantalla.right() - paleta.width()))
             y = min(y, pantalla.bottom() - paleta.height())
         paleta.move(x, y)
+        # Hay que guardarla: es una ventana suelta, sin padre, y si nadie la
+        # guarda Python la borra apenas termina esta función.
+        self._paleta = paleta
         paleta.show()
         paleta.setFocus()
 
