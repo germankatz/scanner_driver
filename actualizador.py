@@ -32,12 +32,19 @@ import time
 
 # La versión del programa. El tag del release tiene que ser "v" + esto: CI lo
 # verifica, y también que el ejecutable la lleve en su recurso de versión.
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 
 # Qué cambió en cada versión, la más nueva primero. Se muestra en "Acerca de",
 # en palabras de quien usa el programa. CI no deja publicar una versión que no
 # tenga su entrada acá.
 NOVEDADES = [
+    ("1.8.0", [
+        "Temas de colores: tocá la paleta de pintor, arriba a la derecha, y elegí cómo se "
+        "ve la ventana. Con el mouse encima de un tema ya lo ves puesto.",
+        "Armá tu propio tema con «Agregar tema»: elegís cinco colores y lo ves en "
+        "miniatura antes de guardarlo.",
+        "Se fue la hora loca: ahora cada escaneo suma uno al contador, siempre.",
+    ]),
     ("1.7.0", [
         "Hora loca: en algún momento de la mañana aparece una tragamonedas. Tirá de la "
         "palanca y durante 3 minutos cada escaneo suma varias veces al contador.",
